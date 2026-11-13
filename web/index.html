@@ -52,6 +52,11 @@
         flex-wrap: wrap;
         align-items: center;
       }
+      p.hint {
+        margin: 0.5rem 0 0;
+        font-size: 0.85rem;
+        color: #555;
+      }
       input[type="text"] {
         flex: 1 1 14rem;
         padding: 0.4rem 0.5rem;
@@ -148,6 +153,13 @@
       <div class="row" style="margin-top: 0.5rem">
         <input id="index-library" type="text" placeholder="library index URL (blank = Arduino's own)" />
       </div>
+      <p class="hint" style="margin-top: 0.5rem">
+        A board URL only works if the server sends
+        <code>access-control-allow-origin</code>. Some vendors do not:
+        <code>files.seeedstudio.com</code> and GitHub release archives both
+        send no such header, so those indices and their toolchains cannot be
+        fetched from a page.
+      </p>
       <div class="row" style="margin-top: 0.5rem">
         <button id="index-apply">Save and reload</button>
       </div>

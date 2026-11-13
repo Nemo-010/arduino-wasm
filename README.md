@@ -72,13 +72,27 @@ The script exits 0 (compiled), 2 (a download was refused), 3 (reached the
 toolchain and could not start it) or 1 (anything else), so the outcome is
 checkable without reading prose.
 
-**Board URLs without CORS headers.** `files.seeedstudio.com` serves
-`package_seeeduino_boards_index.json` with no `access-control-allow-origin`:
-measured 2026-11-13, HTTP 200, header absent. A page cannot read that response,
-and the harness above passes only because Node's fetch does not enforce CORS.
-GitHub-hosted indices (esp32, Adafruit, and the toolchain archives the Seeed
-package points at) do send `*`. A core whose index is not CORS-enabled needs a
-proxy or a mirror you control before the page can install it.
+**Board URLs and archives without CORS headers.** A server only sends
+`access-control-allow-origin` when the request carries an `Origin` header, so
+these were measured with one. Results, 2026-11-13, HTTP status and header
+presence:
+
+| URL | status | `access-control-allow-origin` |
+| --- | --- | --- |
+| `files.seeedstudio.com/.../package_seeeduino_boards_index.json` | 200 | absent |
+| `github.com/adafruit/.../releases/download/...` (the ARM toolchain) | 302 → 206 | absent |
+| `raw.githubusercontent.com/.../package_esp32_index.json` (control) | 200 | `*` |
+
+So a page can neither read Seeed's index nor download the toolchain archives
+that index points at, because those live on GitHub release assets. The control
+shows the measurement is sound: the same request shape does get `*` where the
+host allows it. The Node harness passes only because Node's fetch does not
+enforce CORS.
+
+Installing such a core from the page needs a proxy or a mirror you control.
+`downloads.arduino.cc` refuses this sandbox with 403, so its headers could not
+be measured here; the Arduino Index cores that use it are untested from a
+browser for the same reason.
 
 **Port discovery.** The IDE gets serial ports from `serial-discovery` and
 `mdns-discovery`, which are separate binaries run as plugins. They cannot run
