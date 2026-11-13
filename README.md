@@ -151,9 +151,9 @@ with an optional `tag` input, and weekly on a schedule, so a new upstream
 release is picked up without anyone running anything. The tests are the gate: a
 release that breaks the page fails the run and does not get deployed.
 
-The site lands at `https://<user>.github.io/<repo>/`. Pages has to be enabled
-once for the repository, with the source set to GitHub Actions; until the
-repository exists and that is done, there is no URL.
+The site is at <https://nemo-010.github.io/arduino-wasm/>. Pages is enabled for
+the repository with the source set to GitHub Actions; a fork has to do that
+once, in Settings → Pages.
 
 GitHub Pages serves `.wasm` as `application/wasm`, so
 `WebAssembly.instantiateStreaming` works there, and it sends
