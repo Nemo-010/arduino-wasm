@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""Rebuild the browser build of arduino-cli from an upstream release tag.
+
+This script is the update mechanism. It clones arduino-cli at a tag, copies the
+small overlay in this repository into the clone, applies the build fixes that
+the wasm target needs, compiles the CLI for GOOS=js, and writes the artefacts
+into web/ together with a version manifest. Nothing in the clone is patched by
+hand, so updating is: run this script again with a newer tag.
+
+Usage:
+    python3 scripts/update.py                 # latest upstream release
+    python3 scripts/update.py --tag v1.6.0    # a specific release
+    python3 scripts/update.py --reuse         # rebuild the existing clone
+
+Requires Go (>= 1.24) on PATH, or GO=/path/to/go.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.request
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BUILD = os.path.join(ROOT, "build")
+WEB = os.path.join(ROOT, "web")
+OVERLAY = os.path.join(ROOT, "overlay")
+REPO = "https://github.com/arduino/arduino-cli.git"
+
+
+def log(message):
+    print(message, flush=True)
+
+
+def run(args, cwd=None, env=None):
+    log("+ " + " ".join(args))
+    result = subprocess.run(args, cwd=cwd, env=env)
+    if result.returncode != 0:
+        sys.exit("failed: " + " ".join(args))
+
+
+def go_bin():
+    return os.environ.get("GO", "go")
+
+
+def latest_tag():
+    url = "https://api.github.com/repos/arduino/arduino-cli/releases/latest"
+    request = urllib.request.Request(url, headers={"User-Agent": "arduino-wasm-build"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        release = json.load(response)
+    return release["tag_name"]
+
+
+def copy_overlay(src):
+    """Copy our files over the clone. Overlaid files replace upstream files."""
+    for directory, _, files in os.walk(OVERLAY):
+        for name in files:
+            source = os.path.join(directory, name)
+            relative = os.path.relpath(source, OVERLAY)
+            target = os.path.join(src, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copyfile(source, target)
+            log("overlay " + relative)
+
+
+def patch_sync(src):
+    """SyncTree's Unix implementation uses golang.org/x/sys/unix, absent on js.
+
+    The file is small and generic; excluding js makes the build fall back to a
+    no-op, which is correct: there is no filesystem to flush.
+    """
+    path = os.path.join(src, "internal/arduino/utils/sync_others.go")
+    with open(path) as handle:
+        text = handle.read()
+    if "&& !js" in text:
+        return
+    text = text.replace("//go:build !linux && !windows", "//go:build !linux && !windows && !js")
+    with open(path, "w") as handle:
+        handle.write(text)
+    log("patched internal/arduino/utils/sync_others.go for js")
+
+
+def patch_tool_host(src):
+    """Let the wasm host choose the tool host triple.
+
+    Platforms are matched against tool flavours by runtime.GOOS/GOARCH. On js
+    those are "js"/"wasm", which appear in no package index, so tool download
+    would fail for every platform that has tools. The call sites are redirected
+    to two helpers supplied by the overlay; the count assertions below make an
+    upstream rename fail the build instead of silently drifting.
+    """
+    path = os.path.join(src, "internal/arduino/cores/tools.go")
+    with open(path) as handle:
+        text = handle.read()
+    if "toolHostOS()" in text:
+        return
+    replacements = [
+        (
+            "return tr.GetFlavourFor(runtime.GOOS, forcedArch)",
+            "return tr.GetFlavourFor(toolHostOS(), forcedArch)",
+        ),
+        (
+            "return tr.GetFlavourCompatibleWith(runtime.GOOS, runtime.GOARCH)",
+            "return tr.GetFlavourCompatibleWith(toolHostOS(), toolHostArch())",
+        ),
+    ]
+    for old, new in replacements:
+        if text.count(old) != 1:
+            sys.exit(
+                "internal/arduino/cores/tools.go changed upstream; "
+                "expected exactly one occurrence of: " + old
+            )
+        text = text.replace(old, new)
+    if text.count('\t"runtime"\n') != 1:
+        sys.exit("internal/arduino/cores/tools.go: unexpected runtime import")
+    text = text.replace('\t"runtime"\n', "")
+    with open(path, "w") as handle:
+        handle.write(text)
+    log("patched internal/arduino/cores/tools.go for the tool host triple")
+
+
+def vendor_pb(src, env):
+    """Give github.com/cmaglie/pb a js build.
+
+    arduino-cli's commands package imports internal/cli/feedback, which imports
+    the progress-bar library pb. pb's Unix file is tagged for the BSD/Linux
+    kernels only, so on js the package is missing terminalWidth(). We keep the
+    library stock and add one build-tagged file that returns a fixed width.
+    """
+    gomod = os.path.join(src, "go.mod")
+    with open(gomod) as handle:
+        text = handle.read()
+    # Resolve the module from the module cache, not from a previous replace.
+    stripped = "\n".join(line for line in text.splitlines() if "=> ./third_party/pb" not in line)
+    with open(gomod, "w") as handle:
+        handle.write(stripped)
+
+    result = subprocess.run(
+        [go_bin(), "list", "-m", "-f", "{{.Dir}}", "github.com/cmaglie/pb"],
+        cwd=src, env=env, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        sys.exit("cannot locate github.com/cmaglie/pb: " + result.stderr)
+    module_dir = result.stdout.strip()
+
+    target = os.path.join(src, "third_party", "pb")
+    if os.path.isdir(target):
+        for directory, dirs, files in os.walk(target):
+            os.chmod(directory, 0o755)
+            for name in files:
+                os.chmod(os.path.join(directory, name), 0o644)
+        shutil.rmtree(target)
+    shutil.copytree(module_dir, target, ignore=shutil.ignore_patterns(".git"))
+    for directory, dirs, files in os.walk(target):
+        os.chmod(directory, 0o755)
+        for name in files:
+            os.chmod(os.path.join(directory, name), 0o644)
+
+    with open(os.path.join(target, "go.mod"), "w") as handle:
+        handle.write("module github.com/cmaglie/pb\n\ngo 1.21\n")
+
+    with open(os.path.join(target, "pb_js.go"), "w") as handle:
+        handle.write(
+            "//go:build js\n\n"
+            "package pb\n\n"
+            "import \"errors\"\n\n"
+            "// terminalWidth is not available in a browser; bars are unused there.\n"
+            "func terminalWidth() (int, error) {\n"
+            "\treturn 0, errors.New(\"terminal width is not available in wasm\")\n"
+            "}\n"
+        )
+
+    with open(gomod, "w") as handle:
+        handle.write(stripped + "\nreplace github.com/cmaglie/pb => ./third_party/pb\n")
+    log("vendored github.com/cmaglie/pb with a js terminalWidth")
+
+
+def build(src, env):
+    os.makedirs(WEB, exist_ok=True)
+    wasm = os.path.join(WEB, "arduino-cli.wasm")
+    run(
+        [
+            go_bin(), "build",
+            "-trimpath",
+            "-ldflags", "-s -w",
+            "-o", wasm,
+            "./wasm",
+        ],
+        cwd=src,
+        env=env,
+    )
+
+    goroot = subprocess.run(
+        [go_bin(), "env", "GOROOT"], env=env, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    shutil.copyfile(os.path.join(goroot, "lib/wasm/wasm_exec.js"), os.path.join(WEB, "wasm_exec.js"))
+    return wasm
+
+
+def git(src, *args):
+    result = subprocess.run(["git"] + list(args), cwd=src, capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.exit("git failed: " + result.stderr)
+    return result.stdout.strip()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tag", help="upstream release tag (default: latest)")
+    parser.add_argument("--reuse", action="store_true", help="rebuild src/arduino-cli in place")
+    parser.add_argument("--src", default=os.path.join(BUILD, "arduino-cli"))
+    args = parser.parse_args()
+
+    tag = args.tag
+    src = args.src
+    if not args.reuse:
+        if not tag:
+            tag = latest_tag()
+        if os.path.isdir(src):
+            shutil.rmtree(src)
+        os.makedirs(BUILD, exist_ok=True)
+        log("cloning arduino-cli " + tag)
+        run(["git", "clone", "--depth", "1", "--branch", tag, REPO, src])
+    else:
+        tag = tag or git(src, "describe", "--tags", "--exact-match")
+
+    env = dict(os.environ)
+    env.update({
+        "GOOS": "js",
+        "GOARCH": "wasm",
+        "GOFLAGS": "-mod=mod",
+    })
+    env.setdefault("GOTOOLCHAIN", "local")
+    # Keep the heavy Go caches off small tmpfs mounts.
+    env["GOCACHE"] = os.environ.get("GOCACHE", os.path.join(BUILD, "gocache"))
+    env["GOMODCACHE"] = os.environ.get("GOMODCACHE", os.path.join(BUILD, "gomod"))
+    env["GOTMPDIR"] = os.environ.get("GOTMPDIR", os.path.join(BUILD, "gotmp"))
+    for key in ("GOCACHE", "GOMODCACHE", "GOTMPDIR"):
+        os.makedirs(env[key], exist_ok=True)
+
+    copy_overlay(src)
+    patch_sync(src)
+    patch_tool_host(src)
+    vendor_pb(src, env)
+    wasm = build(src, env)
+
+    version = (tag or "unknown") + " " + git(src, "rev-parse", "--short", "HEAD")
+    manifest = {
+        "arduinoCli": tag,
+        "commit": git(src, "rev-parse", "HEAD"),
+        "go": subprocess.run([go_bin(), "version"], env=env, capture_output=True, text=True).stdout.strip(),
+        "built": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "wasmBytes": os.path.getsize(wasm),
+    }
+    with open(os.path.join(WEB, "version.json"), "w") as handle:
+        json.dump(manifest, handle, indent=2)
+        handle.write("\n")
+    log(json.dumps(manifest, indent=2))
+    log("built " + version)
+
+
+if __name__ == "__main__":
+    main()
