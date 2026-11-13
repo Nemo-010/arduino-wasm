@@ -60,6 +60,7 @@ overlay/                    files copied over the upstream clone
   internal/…                js-specific replacements (locales, sync, tool host)
 scripts/update.py           clone + patch + build; the only update mechanism
 scripts/serve.py            static server, correct wasm content type
+scripts/build-ide.py        builds the arduino-ide frontend for the browser
 web/index.html, app.js      the page
 web/nodefs.js               filesystem shim: IndexedDB or memory, callback API
 web/package.json            marks the page's JavaScript as ES modules for Node
@@ -159,6 +160,62 @@ GitHub Pages serves `.wasm` as `application/wasm`, so
 `WebAssembly.instantiateStreaming` works there, and it sends
 `access-control-allow-origin: *`. Both were checked against a Pages site with a
 wasm file; no fallback is needed.
+
+## The Arduino IDE frontend
+
+The page in `web/` is the CLI half. The IDE's own frontend is the Theia app from
+`arduino/arduino-ide`; `scripts/build-ide.py` builds it for the browser target.
+
+```sh
+python3 scripts/build-ide.py            # clone 2.3.11 and build
+python3 scripts/build-ide.py --reuse    # rebuild in the existing clone
+python3 scripts/build-ide.py --tag 2.3.12
+```
+
+It installs with `--ignore-scripts` and then does the steps that upstream's
+postinstall would have done, because those download binaries from
+`downloads.arduino.cc`, which this build replaces with the wasm CLI anyway:
+
+1. copies `i18n/*.json` to `src/node/resources/i18n` (upstream's `ncp` cannot
+   create the parent directory);
+2. copies `src/node/cli-protocol` to `lib/node/cli-protocol` (upstream's
+   `postbuild`);
+3. builds the `@theia/ffmpeg` addon, which the Theia CLI itself loads;
+4. builds `drivelist`, `keytar`, `native-keymap` and `node-pty`;
+5. runs `@vscode/ripgrep`'s postinstall for the binary the native webpack
+   plugin copies;
+6. writes `src/node/resources/examples/PLACEHOLDER.txt`, because the webpack
+   CopyPlugin globs that directory while ignoring `i18n/**` and aborts when
+   nothing matches.
+
+Measured on 2026-11-13, tag `2.3.11`, Node 24.11.1: exit 0, frontend 64,821,467
+bytes, backend 34,375,912 bytes in `build/ide-dist/`.
+
+`--app-target=browser` is Theia's target name. It still emits a **Node
+backend**: the frontend talks to it over Theia RPC on `/services`, so a browser
+build is a frontend plus a server process, not a static site. To run it:
+
+```sh
+curl -sSL -o cli.tgz https://github.com/arduino/arduino-cli/releases/download/v1.6.0/arduino-cli_1.6.0_Linux_64bit.tar.gz
+mkdir -p build/cli-bin && tar xzf cli.tgz -C build/cli-bin arduino-cli
+cp build/cli-bin/arduino-cli build/ide-dist/backend/resources/
+node build/ide-dist/backend/main.js --port=3000 --hostname=127.0.0.1
+```
+
+Then open `http://127.0.0.1:3000/`. The backend starts `resources/arduino-cli
+daemon` and speaks gRPC to it, exactly as the Electron app does. That daemon
+needs a listening socket, so the wasm CLI cannot serve it: the wasm CLI is
+driven through `arduinoCLI.call` by this project's page instead.
+
+This was verified as far as this sandbox allows: the backend bundle boots,
+resolves the CLI, and stops at `listen EACCES: permission denied
+127.0.0.1:3111`. No process here may bind a socket (`python3` and `node` both
+fail), so the IDE server cannot be started and the rendered UI is unverified.
+
+Making it static is a separate job: it means replacing the backend RPC with
+in-page implementations of the `common/protocol` services, backed by the wasm
+CLI and `web/nodefs.js`. Nothing in the frontend bundle prevents that; the
+handlers are simply not written yet.
 
 ## Serving
 
