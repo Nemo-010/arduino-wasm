@@ -122,6 +122,35 @@ def patch_tool_host(src):
     log("patched internal/arduino/cores/tools.go for the tool host triple")
 
 
+def module_dir_of(src, env, module):
+    """Absolute path of a module in the module cache, downloading it first.
+
+    `go list -m` reports a directory only for a module already in the cache; on
+    a cold machine it prints an empty line instead of fetching, so the caller
+    has to ask for the download explicitly.
+    """
+
+    def lookup():
+        result = subprocess.run(
+            [go_bin(), "list", "-m", "-f", "{{.Dir}}", module],
+            cwd=src, env=env, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            sys.exit("cannot locate " + module + ": " + result.stderr)
+        return result.stdout.strip()
+
+    found = lookup()
+    if found:
+        return found
+    log("downloading " + module)
+    if subprocess.run([go_bin(), "mod", "download", module], cwd=src, env=env).returncode != 0:
+        sys.exit("cannot download " + module)
+    found = lookup()
+    if not found:
+        sys.exit("cannot locate " + module + " after downloading it")
+    return found
+
+
 def vendor_pb(src, env):
     """Give github.com/cmaglie/pb a js build.
 
@@ -138,13 +167,7 @@ def vendor_pb(src, env):
     with open(gomod, "w") as handle:
         handle.write(stripped)
 
-    result = subprocess.run(
-        [go_bin(), "list", "-m", "-f", "{{.Dir}}", "github.com/cmaglie/pb"],
-        cwd=src, env=env, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        sys.exit("cannot locate github.com/cmaglie/pb: " + result.stderr)
-    module_dir = result.stdout.strip()
+    module_dir = module_dir_of(src, env, "github.com/cmaglie/pb")
 
     target = os.path.join(src, "third_party", "pb")
     if os.path.isdir(target):
