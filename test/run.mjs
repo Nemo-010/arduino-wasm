@@ -142,6 +142,25 @@ async function main() {
   check(Boolean(testLib), "library appears in LibraryList");
   check((testLib?.library?.installDir ?? "").includes("libraries/TestLib"), "library install dir is under the user tree");
 
+  console.log("\nLarge file writes");
+  // Allocating an exact-size buffer per write is quadratic: 32 MB in 8 KB
+  // chunks copies ~64 GB. Geometric capacity growth keeps this under a second.
+  const bigPath = "/home/arduino/big.bin";
+  const chunk = new Uint8Array(8192).fill(0x5a);
+  const writes = 4096;
+  const started = Date.now();
+  const call = (fn, ...args) => new Promise((resolve, reject) => fn(...args, (error, value) => (error ? reject(error) : resolve(value))));
+  const bigFd = await call(cli.shim.fs.open, bigPath, "w", 0o644);
+  for (let index = 0; index < writes; index += 1) {
+    await call(cli.shim.fs.write, bigFd, chunk, 0, chunk.length, null);
+  }
+  await call(cli.shim.fs.close, bigFd);
+  const elapsed = Date.now() - started;
+  const big = await cli.shim.backend.get(bigPath);
+  check(big.data.length === writes * chunk.length, `32 MB survived the write path (${elapsed} ms)`);
+  check(elapsed < 10000, "write growth stays linear");
+  await call(cli.shim.fs.unlink, bigPath);
+
   console.log("\nFilesystem");
   const keys = await cli.shim.backend.keys();
   const expected = [

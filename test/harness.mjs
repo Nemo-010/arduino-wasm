@@ -69,7 +69,7 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
     },
   };
 
-  function call(method, request, { timeoutMs = 120000 } = {}) {
+  function call(method, request, { timeoutMs = 120000, onEvent } = {}) {
     return new Promise((resolve, reject) => {
       const events = [];
       const timer = setTimeout(() => {
@@ -78,6 +78,7 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
       globalThis.arduinoCLI.call(method, JSON.stringify(request ?? {}), (raw) => {
         const event = JSON.parse(raw);
         events.push(event);
+        onEvent?.(event);
         if (event.type === "error") {
           clearTimeout(timer);
           const error = new Error(`${method}: ${event.message}`);

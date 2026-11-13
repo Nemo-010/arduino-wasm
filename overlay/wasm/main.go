@@ -30,12 +30,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"reflect"
 	"runtime/debug"
 	"syscall/js"
 
 	"github.com/arduino/arduino-cli/commands"
 	rpc "github.com/arduino/arduino-cli/rpc/cc/arduino/cli/commands/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -183,7 +186,36 @@ func taskEmitter(emit emitter) rpc.TaskProgressCB {
 // streamHandlers are the RPCs that send more than one response. Each one calls
 // the real service method with the real request type; only the transport is
 // replaced.
+// compileStream carries CompileResponse values from the real Compile method to
+// the JavaScript callback. Compile is the one RPC arduino-cli exposes as a
+// server stream without shipping a callback adapter, so the adapter lives here.
+// Everything else about the call is upstream's.
+type compileStream struct {
+	send func(*rpc.CompileResponse) error
+}
+
+func (s *compileStream) Send(m *rpc.CompileResponse) error { return s.send(m) }
+func (s *compileStream) SetHeader(metadata.MD) error       { return nil }
+func (s *compileStream) SendHeader(metadata.MD) error      { return nil }
+func (s *compileStream) SetTrailer(metadata.MD)            {}
+func (s *compileStream) Context() context.Context          { return ctx }
+func (s *compileStream) SendMsg(any) error                 { return nil }
+func (s *compileStream) RecvMsg(any) error                 { return io.EOF }
+
+var _ grpc.ServerStreamingServer[rpc.CompileResponse] = (*compileStream)(nil)
+
 var streamHandlers = map[string]streamHandler{
+	"Compile": func(reqJSON string, emit emitter) error {
+		var req rpc.CompileRequest
+		if err := unmarshal(reqJSON, &req); err != nil {
+			return err
+		}
+		stream := &compileStream{send: func(m *rpc.CompileResponse) error {
+			emit("result", m)
+			return nil
+		}}
+		return srv.Compile(&req, stream)
+	},
 	"Init": func(reqJSON string, emit emitter) error {
 		var req rpc.InitRequest
 		if err := unmarshal(reqJSON, &req); err != nil {

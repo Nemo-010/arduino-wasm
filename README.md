@@ -46,6 +46,40 @@ That is a property of the platform, not of this build. Uploading has the same
 shape: `avrdude` and friends are child processes too. WebSerial can open the
 port, but there is no compiler to produce the bytes to send.
 
+The board run is reproduced by `NETWORK=1 node test/nrf52.mjs`. It adds Seeed's
+board URL, installs `Seeeduino:nrf52@1.1.9`, writes blink and compiles it for
+the XIAO nRF52840. Measured 2026-11-13 it took 74 s and stopped at the same
+wall:
+
+```
+compile failed: Compile: pipe: not implemented on js
+```
+
+Everything before that wall worked, against the real servers:
+
+- the 290,172 byte index fetched over TLS and parsed into 14 releases of
+  `Seeeduino:nrf52`, five of them boards, including "Seeed XIAO nRF52840";
+- the platform and all three tool dependencies installed into the wasm
+  filesystem: 2,451 core files and 13,905 tool files;
+- the ARM compiler now on disk is a 1,153,656 byte x86-64 ELF, `e_machine 62`.
+
+That last line decides what comes next. A vendor toolchain has no source, so it
+cannot be built to wasm; running it needs a Linux ELF emulator such as gex. The
+binary the installer produced is exactly the shape gex accepts. Until that runs,
+nothing in this project can produce a `.hex` or a `.uf2`.
+
+The script exits 0 (compiled), 2 (a download was refused), 3 (reached the
+toolchain and could not start it) or 1 (anything else), so the outcome is
+checkable without reading prose.
+
+**Board URLs without CORS headers.** `files.seeedstudio.com` serves
+`package_seeeduino_boards_index.json` with no `access-control-allow-origin`:
+measured 2026-11-13, HTTP 200, header absent. A page cannot read that response,
+and the harness above passes only because Node's fetch does not enforce CORS.
+GitHub-hosted indices (esp32, Adafruit, and the toolchain archives the Seeed
+package points at) do send `*`. A core whose index is not CORS-enabled needs a
+proxy or a mirror you control before the page can install it.
+
 **Port discovery.** The IDE gets serial ports from `serial-discovery` and
 `mdns-discovery`, which are separate binaries run as plugins. They cannot run
 in a tab, so `Init` reports them as missing. That message is expected. The page
@@ -240,11 +274,15 @@ node test/run.mjs            # the CLI, through the same sequence the IDE uses
 node test/page.mjs           # the page itself, headless
 python3 test/serve_test.py   # the static server's headers
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
+NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
 
 `test/run.mjs` drives the wasm CLI directly: init, index update, platform
 search, platform install (with its tools), library install, board
-identification, and assertions on the resulting files. The fixture index points
+identification, and assertions on the resulting files. It also writes 32 MB in
+8 KB chunks and fails if that takes more than ten seconds, which is the guard
+against a write path that copies the whole file on every write. The fixture
+index points
 at `test/fixtures`, served through an injected `fetch`, because this sandbox
 cannot bind a socket.
 

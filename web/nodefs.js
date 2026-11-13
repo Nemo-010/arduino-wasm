@@ -17,6 +17,7 @@ const S_IFREG = 0o100000;
 const S_IFLNK = 0o120000;
 const S_IFCHR = 0o020000;
 
+const O_RDONLY = 0;
 const O_WRONLY = 1;
 const O_RDWR = 2;
 const O_CREAT = 0x40;
@@ -332,6 +333,27 @@ export function createNodeFS(options = {}) {
   const MODE_FILE = (value) => (value === undefined ? 0o666 : value & 0o7777);
   const MODE_DIR = (value) => (value === undefined ? 0o777 : value & 0o7777);
 
+  // Go passes numeric flags, but the shim is also used directly by the page and
+  // by the tests, where "w" is the obvious thing to write. A string flag that
+  // reaches the numeric checks would silently mean O_RDONLY and turn a create
+  // into ENOENT.
+  const FLAGS_BY_NAME = {
+    r: O_RDONLY,
+    "r+": O_RDWR,
+    w: O_WRONLY | O_CREAT | O_TRUNC,
+    "w+": O_RDWR | O_CREAT | O_TRUNC,
+    a: O_WRONLY | O_CREAT | O_APPEND,
+    "a+": O_RDWR | O_CREAT | O_APPEND,
+  };
+
+  function flagBits(flags) {
+    if (flags === undefined) return O_RDONLY;
+    if (typeof flags !== "string") return flags;
+    const bits = FLAGS_BY_NAME[flags];
+    if (bits === undefined) throw fsError("EINVAL", "flags: " + flags);
+    return bits;
+  }
+
   const fs = {
     // The Go runtime itself (panic output, runtime.print) writes to fd 1/2
     // through this synchronous hook rather than the syscall path.
@@ -358,6 +380,7 @@ export function createNodeFS(options = {}) {
 
     open(path, flags, mode, cb) {
       callback(cb, (async () => {
+        flags = flagBits(flags);
         const resolved = await resolve(path, true, true);
         let entry = await entryAt(resolved);
         const creating = (flags & O_CREAT) !== 0;
@@ -568,9 +591,18 @@ export function createNodeFS(options = {}) {
             : Number(position);
         const end = start + length;
         if (end > file.data.length) {
-          const data = new Uint8Array(end);
-          data.set(file.data);
-          file.data = data;
+          // Grow the capacity geometrically and expose only the written range.
+          // Allocating an exact-size buffer per write copies the whole file each
+          // time: a 116 MB tarball written in 32 KB chunks copies ~200 GB.
+          const storage = file.data.buffer;
+          const offset = file.data.byteOffset;
+          if (offset + end > storage.byteLength) {
+            const grown = new Uint8Array(Math.max(end, storage.byteLength * 2));
+            grown.set(file.data);
+            file.data = grown.subarray(0, end);
+          } else {
+            file.data = new Uint8Array(storage, offset, end);
+          }
         }
         file.data.set(buffer.subarray(offset, offset + length), start);
         if (append || position === null || position === undefined) file.offset = end;
