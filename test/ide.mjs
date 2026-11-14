@@ -57,6 +57,23 @@ async function main() {
     calls.length > 0,
     calls.length + ' calls, first: ' + (calls[0] ? calls[0].path + ' ' + calls[0].method : 'none'),
   );
+  // A method the frontend asks for and nobody answers comes back `undefined`,
+  // which reaches `.filter()`/`.map()` further up and shows as a TypeError with
+  // no clue where it came from. Failing here names the method instead.
+  let missing = [];
+  try {
+    missing = JSON.parse(state.missing || '[]');
+  } catch {
+    missing = [];
+  }
+  check(
+    'every boot RPC has an implementation',
+    missing.length === 0,
+    missing.length === 0
+      ? 'none unimplemented'
+      : missing.length + ' unimplemented: ' +
+        missing.slice(0, 6).map(m => m.path + ' ' + m.method).join(', '),
+  );
   check('toolbar rendered', /Select Board/.test(bodyText), bodyText.slice(0, 80));
   check(
     'a sketch is open in the editor',

@@ -163,7 +163,14 @@ function install(container) {
 
 class OfflineSocketSource extends ElectronWebSocketConnectionSource {
   openSocket() {
-    // deliberately does nothing
+    // The RPC traffic goes over the in-memory channel pair, so no websocket is
+    // opened. The connection-status service still asks the socket whether the
+    // backend is up (`socket.connected`), and in this build it always is:
+    // the backend runs in this same page.
+    this._socket = {
+      connected: true,
+      close: () => undefined,
+    };
   }
 }
 

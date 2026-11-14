@@ -294,6 +294,137 @@ function createServices({ log }) {
     checkSketchCasing: () => 'ok',
   });
 
+  // These have no backend behind them in a browser and never will: there is no
+  // VS Code extension host to deploy plugins into, no debug adapter to launch,
+  // no CLI preferences file, and no gRPC daemon port. Answering with the empty
+  // shape is the true answer here, not a placeholder for missing work.
+  define('/os', {
+    getBackendOS: () => 'Linux',
+  });
+
+  define('/services/i18n', {
+    getCurrentLanguage: () => 'en',
+    setCurrentLanguage: () => undefined,
+    getAvailableLanguages: () => [
+      { languageId: 'en', languageName: 'English', languagePack: false },
+    ],
+    loadLocalization: languageId => ({ languageId, translations: {} }),
+  });
+
+  define('/services/cli-preferences', {
+    getPreferences: () => [],
+  });
+
+  define('/services/plugin-paths', {
+    getHostStoragePath: () => '/home/user/.theia/plugin-storage',
+    getHostLogPath: () => '/tmp/plugin-host.log',
+  });
+
+  define('/services/debug', {
+    debugTypes: () => [],
+    getDebuggersForLanguage: () => [],
+    getConfigurationSnippets: () => [],
+    registerDebugAdapterFactory: () => undefined,
+    unregisterDebugAdapterFactory: () => undefined,
+  });
+
+  define('/services/hostedPlugin', {
+    getDeployedPluginIds: () => [],
+    getUninstalledPluginIds: () => [],
+    getDeployedPluginMetadata: () => [],
+    getSupportedExtensions: () => [],
+    getLatestUninstalledPluginVersion: () => undefined,
+  });
+
+  // Signing in needs the Arduino OAuth flow and a secret store; a page has
+  // neither, so `session` reports nobody and `login` says why. Silently
+  // pretending to sign in would be worse than refusing.
+  define('/services/authentication-service', {
+    session: () => undefined,
+    setOptions: () => undefined,
+    initAuthSession: () => undefined,
+    logout: () => undefined,
+    setClient: () => undefined,
+    disposeClient: () => undefined,
+    login: () => {
+      throw new Error('sign-in is not available in the browser build');
+    },
+  });
+
+  // There is no `arduino-cli daemon` process: the wasm CLI is called directly.
+  define('/services/arduino-daemon', {
+    tryGetPort: () => undefined,
+  });
+
+  // The services below are the ones the wasm CLI will fill in. Until that is
+  // wired, they answer the empty value of the type they declare rather than
+  // `undefined`: `undefined` reaches `.filter()`/`.map()` inside the frontend
+  // and surfaces as a TypeError that hides the real gap.
+  define('/services/boards-service', {
+    search: () => [],
+    searchBoards: () => [],
+    getInstalledBoards: () => [],
+    getInstalledPlatforms: () => [],
+    getDetectedPorts: () => ({}),
+    getBoardPackage: () => undefined,
+    getContainerBoardPackage: () => undefined,
+    getBoardDetails: () => undefined,
+    checkDebugEnabled: () => '',
+    install: () => undefined,
+    uninstall: () => undefined,
+    updateIndex: () => undefined,
+  });
+
+  define('/services/config-service', {
+    // The declared union has this member: no config yet, and no messages.
+    getConfiguration: () => ({ config: undefined, messages: [] }),
+    setConfiguration: () => undefined,
+  });
+
+  define('/services/example-service', {
+    builtIns: () => [],
+    installed: () => ({ user: [], current: [], any: [] }),
+    find: () => [],
+  });
+
+  define('/services/library-service', {
+    search: () => [],
+    list: () => [],
+    install: () => undefined,
+    installZip: () => undefined,
+    uninstall: () => undefined,
+    updateIndex: () => undefined,
+    listDependencies: () => [],
+  });
+
+  // A summary is a map of index type to completion time; empty means none.
+  define('/services/core-service', {
+    indexUpdateSummaryBeforeInit: () => ({}),
+    updateIndex: () => undefined,
+    refresh: () => undefined,
+    compile: () => {
+      throw new Error(
+        'compiling is not wired up yet: the toolchain needs to run, which this page cannot do',
+      );
+    },
+    upload: () => {
+      throw new Error('uploading is not wired up yet');
+    },
+    burnBootloader: () => {
+      throw new Error('burning a bootloader is not wired up yet');
+    },
+  });
+
+  define('/services/arduino-firmware-uploader', {
+    updatableBoards: () => [],
+    list: () => [],
+    availableFirmwares: () => [],
+    uploadCertificates: () => undefined,
+    flash: () => {
+      throw new Error('flashing firmware is not wired up yet');
+    },
+  });
+
   return {
     calls,
     get: path => entries.get(path),

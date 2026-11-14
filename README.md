@@ -293,9 +293,10 @@ files carry it:
   `ServiceConnectionProvider` is created lazily;
 - `inpage/services.js` — the service targets: logger, keyboard, application,
   envs, workspace, stopwatch, task, remote-filesystem over an in-memory tree,
-  and sketches. They answer the shapes the frontend expects, because
-  `undefined` surfaces as a `TypeError` inside Theia and hides which contract
-  was missing;
+  sketches, and the Theia-core surface a browser cannot need (`i18n`, `debug`,
+  `hostedPlugin`, `plugin-paths`, `cli-preferences`, `authentication-service`).
+  They answer the shapes the frontend expects, because `undefined` surfaces as a
+  `TypeError` inside Theia and hides which contract was missing;
 - `inpage/inpage-backend-module.js` — `install(container)` rebinds the
   messaging symbols, wraps every target in a recorder that counts calls and
   names unimplemented methods, and stubs `window.electronTheiaCore` and
@@ -311,18 +312,27 @@ forever. With the in-page backend installed first, preload settles in
 milliseconds.
 
 Measured in headless Chrome 157 on 2026-11-14: the workbench reaches `ready`
-1.745 s after frontend start, the toolbar renders `Select Board` and `No board
+1.708 s after frontend start, the toolbar renders `Select Board` and `No board
 selected`, a `sketch_20261114l.ino` is open in a Monaco editor with
-`void setup() {}`, and 110 RPC calls have been answered. `node test/ide.mjs`
+`void setup() {}`, and 120 RPC calls have been answered. `node test/ide.mjs`
 asserts those, and it fails six checks when the install line is removed.
 
-It is a shell, not a working IDE. The recorder lists the services that no
-target implements yet — `boards-service`, `config-service`, `example-service`,
-`library-service`, `cli-preferences`, `arduino-daemon`,
-`arduino-firmware-uploader`, `authentication-service`, `plugin-paths`, `debug`,
-`hostedPlugin` — and `window.__inpageMissing` reports each one it is asked for.
-Those are the work list: each becomes a call into `arduinoCLI.call`, sharing the
-wasm CLI's storage instead of the in-memory tree.
+Every RPC the boot makes now has an implementation; `window.__inpageMissing` is
+empty, and `test/ide.mjs` fails and names the method when one is not. The eight
+CLI-backed services (`boards-service`, `config-service`, `example-service`,
+`library-service`, `core-service`, `arduino-firmware-uploader`,
+`arduino-daemon`) answer the empty value of their declared type — `[]`, `{}`,
+`{ config: undefined, messages: [] }` — rather than `undefined`, and the three
+that would need to run something (`compile`, `upload`, `flash`) refuse with a
+message saying so. Wiring them to `arduinoCLI.call` is the remaining work; until
+then the IDE shows its own diagnosis, two notifications reading "Could not
+install Arduino AVR platform: Error: Could not find platform" and "Could not
+install Arduino_BuiltIn library: Error: Could not find library".
+
+One boot error is a real gap, not a stub: `A resource provider for
+'user-storage:/user/keymaps.json' is not registered`, thrown from
+`c.loadModel`, which leaves the keymaps editor without a model. The other two
+are `Canceled: Canceled` from model disposal.
 
 Running the Electron-shaped server is still possible and still the reference
 path:
@@ -384,14 +394,17 @@ identify a board from a fake WebSerial port, and save index settings.
 
 `test/ide.mjs` boots the built IDE frontend in headless Chrome over a CDP pipe
 and asserts what the app itself reports: the shell has body text, the title
-names the IDE, the in-page backend is installed, RPC calls were answered, the
-toolbar says `Select Board`, a `.ino` is open in the editor, and the workbench
-logged the transition to `ready`. `test/cdp.mjs` is the driver: it reads
+names the IDE, the in-page backend is installed, RPC calls were answered, every
+RPC the boot made has an implementation, the toolbar says `Select Board`, a
+`.ino` is open in the editor, and the workbench logged the transition to
+`ready`. `test/cdp.mjs` is the driver: it reads
 commands on fd 3 and replies on fd 4, never rejects (a dead renderer still
 yields its console), and enables `Inspector` so a renderer crash is recorded.
 The test exits 2 when Chrome or `build/ide-dist/frontend/index.html` is absent.
 It fails six checks when the in-page install line is removed; that was planted
-and measured.
+and measured. Unregistering one service target fails the implementation check
+with the three methods named — `/services/library-service search, search, list`
+— and that was planted and measured too.
 
 `test/serve_test.py` drives the real handler over a socket pair and checks the
 wasm content type and the no-store header.
