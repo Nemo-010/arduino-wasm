@@ -153,12 +153,17 @@
       <div class="row" style="margin-top: 0.5rem">
         <input id="index-library" type="text" placeholder="library index URL (blank = Arduino's own)" />
       </div>
+      <div class="row" style="margin-top: 0.5rem">
+        <input id="gateway" type="text" placeholder="CORS gateway URL (blank = fetch directly)" />
+      </div>
       <p class="hint" style="margin-top: 0.5rem">
         A board URL only works if the server sends
         <code>access-control-allow-origin</code>. Some vendors do not:
         <code>files.seeedstudio.com</code> and GitHub release archives both
         send no such header, so those indices and their toolchains cannot be
-        fetched from a page.
+        fetched from a page. A gateway above fetches them on the page's behalf;
+        <code>python3 scripts/gateway.py</code> is one, and it can live on your
+        own network. It is read at startup, so saving reloads the page.
       </p>
       <div class="row" style="margin-top: 0.5rem">
         <button id="index-apply">Save and reload</button>

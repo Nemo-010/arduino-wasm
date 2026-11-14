@@ -61,6 +61,12 @@ jobs:
       - name: Test the static server
         run: python3 test/serve_test.py
 
+      - name: Test the CORS gateway
+        run: python3 test/gateway_test.py
+
+      - name: Test the gateway rewrite
+        run: node test/gateway.mjs
+
       - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v5

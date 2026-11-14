@@ -122,6 +122,42 @@ def patch_tool_host(src):
     log("patched internal/arduino/cores/tools.go for the tool host triple")
 
 
+def patch_cors_gateway(src):
+    """Route HTTP through a CORS gateway when one is configured.
+
+    On js the HTTP client is fetch(), and fetch is what enforces CORS. An index
+    or a release asset that sends no access-control-allow-origin is unreadable
+    from a page, though the same code works under Node or on a desktop. Both
+    places that build an HTTP client get the wrapper; the count assertions make
+    an upstream rewrite fail the build instead of shipping a silent no-op.
+    """
+    path = os.path.join(src, "internal/cli/configuration/network.go")
+    with open(path) as handle:
+        text = handle.read()
+    if "gatewayTransport(" in text:
+        return
+    replacements = [
+        (
+            "\t\t\ttransport: maybeWrapWithGitHubAuth(&http.Transport{\n\t\t\t\tProxy: http.ProxyURL(proxy),\n\t\t\t}),",
+            "\t\t\ttransport: gatewayTransport(maybeWrapWithGitHubAuth(&http.Transport{\n\t\t\t\tProxy: http.ProxyURL(proxy),\n\t\t\t})),",
+        ),
+        (
+            "\t\t\tTransport: maybeWrapWithGitHubAuth(&http.Transport{\n\t\t\t\tProxy: http.ProxyURL(proxy),\n\t\t\t}),",
+            "\t\t\tTransport: gatewayTransport(maybeWrapWithGitHubAuth(&http.Transport{\n\t\t\t\tProxy: http.ProxyURL(proxy),\n\t\t\t})),",
+        ),
+    ]
+    for old, new in replacements:
+        if text.count(old) != 1:
+            sys.exit(
+                "internal/cli/configuration/network.go changed upstream; "
+                "expected exactly one occurrence of: " + old
+            )
+        text = text.replace(old, new)
+    with open(path, "w") as handle:
+        handle.write(text)
+    log("patched internal/cli/configuration/network.go for the CORS gateway")
+
+
 def module_dir_of(src, env, module):
     """Absolute path of a module in the module cache, downloading it first.
 
@@ -267,6 +303,7 @@ def main():
     copy_overlay(src)
     patch_sync(src)
     patch_tool_host(src)
+    patch_cors_gateway(src)
     vendor_pb(src, env)
     wasm = build(src, env)
 

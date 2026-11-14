@@ -94,6 +94,40 @@ Installing such a core from the page needs a proxy or a mirror you control.
 be measured here; the Arduino Index cores that use it are untested from a
 browser for the same reason.
 
+### The gateway
+
+`scripts/gateway.py` is that proxy, and it is the only piece that has to run
+somewhere other than the page:
+
+```
+python3 scripts/gateway.py --port 8787
+# then set the gateway field in the page, or pass it to a harness:
+ARDUINO_CORS_GATEWAY=http://127.0.0.1:8787 node test/gateway.mjs
+```
+
+The rewrite happens in Go's transport, so an index, an archive and a resumed
+range all go through one wrapper and no caller knows the difference. Set the
+variable before the wasm starts: Go's js ABI copies the environment into linear
+memory at startup (`wasm_exec.js` writes argv and env into the same block), so
+it cannot change afterwards. The page reads the value from `localStorage` and
+reloads when you save it.
+
+Requests are `GET /u/<base64url of the target>`. Only `https` targets are
+fetched unless `--allow-http` is passed; `Range`, `206`, `Content-Range`,
+`ETag`, `Last-Modified` and redirects pass through; a response with no
+`Content-Length` is re-framed as chunked so the browser knows where it ends. The
+origin's own `access-control-*` headers are dropped in favour of the gateway's,
+so the page can read a success and can also read an origin's refusal instead of
+seeing an opaque CORS error.
+
+Why not the WebVM route. WebVM runs a Linux with real sockets, so its `curl`
+can ride Tailscale's userspace WireGuard. This wasm has no sockets: Go's js
+HTTP transport calls `fetch()` directly (`net/http/roundtrip_js.go:130`), which
+makes `network.proxy` a no-op, so in-page Tailscale would first mean replacing
+`fetch` with a socket API. Both routes end at "some server fetches the URL";
+the gateway is the smaller one, and it can sit on your tailnet if you want it
+private.
+
 **Port discovery.** The IDE gets serial ports from `serial-discovery` and
 `mdns-discovery`, which are separate binaries run as plugins. They cannot run
 in a tab, so `Init` reports them as missing. That message is expected. The page
@@ -287,6 +321,8 @@ for any other host.
 node test/run.mjs            # the CLI, through the same sequence the IDE uses
 node test/page.mjs           # the page itself, headless
 python3 test/serve_test.py   # the static server's headers
+python3 test/gateway_test.py # the CORS gateway, over a socket pair
+node test/gateway.mjs        # the gateway URL rewrite in Go's transport
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
@@ -307,6 +343,20 @@ identify a board from a fake WebSerial port, and save index settings.
 
 `test/serve_test.py` drives the real handler over a socket pair and checks the
 wasm content type and the no-store header.
+
+`test/gateway_test.py` drives the gateway the same way, with the upstream fetch
+replaced by a recorder: it checks a 200 with the CORS header, a 206 that keeps
+`Content-Range`, chunked framing when the origin sends no length, a passed
+through 403, a 400 for bad base64, a 403 for an `http://` target, a 502 for a
+transport failure, the preflight, and HEAD.
+
+`test/gateway.mjs` runs two wasm instances: one with `ARDUINO_CORS_GATEWAY` set
+and one without. Its fetch refuses nothing, but records every URL, and the
+gateway phase asserts that every request — index, library index, and the
+archive the downloader fetches with its own client — arrives gateway-shaped and
+decodes back to the real URL, while the second instance shows requests going
+direct when the variable is absent. It fails when the transport wrapper is
+removed: that was planted and measured, 6 failed checks.
 
 None of these run a browser. CORS, WebSerial against real hardware, IndexedDB
 persistence across reloads, and layout are not covered here; there is no browser

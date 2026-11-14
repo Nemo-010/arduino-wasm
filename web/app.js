@@ -86,6 +86,7 @@ const CONFIG_KEYS = {
   defaultIndex: "arduino.index.default",
   extraIndexes: "arduino.index.extra",
   libraryIndex: "arduino.index.library",
+  gateway: "arduino.index.gateway",
 };
 
 function readConfig() {
@@ -147,6 +148,9 @@ async function boot() {
   go.env = { HOME: "/home/arduino", TMPDIR: "/tmp", PATH: "/bin" };
   if (config.defaultIndex) go.env.ARDUINO_DEFAULT_INDEX_URL = config.defaultIndex;
   if (config.libraryIndex) go.env.ARDUINO_LIBRARIES_INDEX_URL = config.libraryIndex;
+  // Read once, at startup: the Go js ABI copies the environment into linear
+  // memory when the program starts, so this cannot be changed afterwards.
+  if (config.gateway) go.env.ARDUINO_CORS_GATEWAY = config.gateway;
   go.exit = (code) => log(`the CLI exited with code ${code}`, "err");
 
   const ready = new Promise((resolve) => {
@@ -472,6 +476,7 @@ $("index-apply").onclick = () => {
   globalThis.localStorage?.setItem(CONFIG_KEYS.defaultIndex, $("index-default").value.trim());
   globalThis.localStorage?.setItem(CONFIG_KEYS.extraIndexes, $("index-extra").value.trim());
   globalThis.localStorage?.setItem(CONFIG_KEYS.libraryIndex, $("index-library").value.trim());
+  globalThis.localStorage?.setItem(CONFIG_KEYS.gateway, $("gateway").value.trim());
   location.reload();
 };
 $("reset").onclick = async () => {

@@ -220,6 +220,7 @@ async function main() {
   console.log("\nIndex configuration");
   byId.get("index-default").value = " http://mirror.test/package_index.json ";
   byId.get("index-extra").value = "http://a.test/package_a.json, http://b.test/package_b.json";
+  byId.get("gateway").value = " https://gw.test ";
   byId.get("index-apply").onclick();
   check(
     globalThis.localStorage.getItem("arduino.index.default") === "http://mirror.test/package_index.json",
@@ -229,6 +230,10 @@ async function main() {
     globalThis.localStorage.getItem("arduino.index.extra") ===
       "http://a.test/package_a.json, http://b.test/package_b.json",
     "the extra index URLs are saved",
+  );
+  check(
+    globalThis.localStorage.getItem("arduino.index.gateway") === "https://gw.test",
+    "the gateway URL is saved trimmed",
   );
 
   console.log("\nall checks passed");
