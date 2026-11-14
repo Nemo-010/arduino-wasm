@@ -148,6 +148,7 @@ web/nodefs.js               filesystem shim: IndexedDB or memory, callback API
 web/package.json            marks the page's JavaScript as ES modules for Node
 web/arduino-cli.wasm        the build output
 web/version.json            what the wasm was built from
+ide/inpage/                 the in-page backend: channel pair, services, install
 test/                       see Tests
 ```
 
@@ -270,12 +271,61 @@ postinstall would have done, because those download binaries from
    CopyPlugin globs that directory while ignoring `i18n/**` and aborts when
    nothing matches.
 
-Measured on 2026-11-13, tag `2.3.11`, Node 24.11.1: exit 0, frontend 64,821,467
-bytes, backend 34,375,912 bytes in `build/ide-dist/`.
+Measured on 2026-11-14, tag `2.3.11`, Node 24.11.1: exit 0, frontend
+118,632,923 bytes, backend 75,289,689 bytes in `build/ide-dist/`. The frontend
+is larger than a plain browser build because `ide/inpage/` is bundled into it.
+
+### The in-page backend
 
 `--app-target=browser` is Theia's target name. It still emits a **Node
-backend**: the frontend talks to it over Theia RPC on `/services`, so a browser
-build is a frontend plus a server process, not a static site. To run it:
+backend**: the frontend asks for its services over Theia RPC on `/services`, so
+a browser build is normally a frontend plus a server process. `ide/inpage/`
+removes the server from the path without reimplementing the protocol:
+
+Theia's own `ChannelMultiplexer` and `RpcProxyFactory` are wired on both ends of
+an in-memory channel pair, and the provider symbols the frontend resolves
+(`ConnectionSource`, `ServiceConnectionProvider`) are bound to that pair. Three
+files carry it:
+
+- `inpage/channel.js` — a `ForwardingChannel` pair that delivers each frame
+  from a microtask, so the two multiplexer state machines never re-enter each
+  other; the connection source replays its channel to late listeners, because
+  `ServiceConnectionProvider` is created lazily;
+- `inpage/services.js` — the service targets: logger, keyboard, application,
+  envs, workspace, stopwatch, task, remote-filesystem over an in-memory tree,
+  and sketches. They answer the shapes the frontend expects, because
+  `undefined` surfaces as a `TypeError` inside Theia and hides which contract
+  was missing;
+- `inpage/inpage-backend-module.js` — `install(container)` rebinds the
+  messaging symbols, wraps every target in a recorder that counts calls and
+  names unimplemented methods, and stubs `window.electronTheiaCore` and
+  `window.electronArduino` (a browser has no Electron preload).
+
+The build inserts two lines into the generated entry, after
+`container.load(messagingFrontendModule)` and before anything resolves a
+service. The insertion asserts its match count, so an upstream change to that
+entry stops the build. The ordering matters: Theia's default providers open a
+WebSocket to a backend that does not exist here, and the OS and i18n preload
+contributions await them, so installing after `preload()` stalls the boot
+forever. With the in-page backend installed first, preload settles in
+milliseconds.
+
+Measured in headless Chrome 157 on 2026-11-14: the workbench reaches `ready`
+1.745 s after frontend start, the toolbar renders `Select Board` and `No board
+selected`, a `sketch_20261114l.ino` is open in a Monaco editor with
+`void setup() {}`, and 110 RPC calls have been answered. `node test/ide.mjs`
+asserts those, and it fails six checks when the install line is removed.
+
+It is a shell, not a working IDE. The recorder lists the services that no
+target implements yet — `boards-service`, `config-service`, `example-service`,
+`library-service`, `cli-preferences`, `arduino-daemon`,
+`arduino-firmware-uploader`, `authentication-service`, `plugin-paths`, `debug`,
+`hostedPlugin` — and `window.__inpageMissing` reports each one it is asked for.
+Those are the work list: each becomes a call into `arduinoCLI.call`, sharing the
+wasm CLI's storage instead of the in-memory tree.
+
+Running the Electron-shaped server is still possible and still the reference
+path:
 
 ```sh
 curl -sSL -o cli.tgz https://github.com/arduino/arduino-cli/releases/download/v1.6.0/arduino-cli_1.6.0_Linux_64bit.tar.gz
@@ -284,20 +334,10 @@ cp build/cli-bin/arduino-cli build/ide-dist/backend/resources/
 node build/ide-dist/backend/main.js --port=3000 --hostname=127.0.0.1
 ```
 
-Then open `http://127.0.0.1:3000/`. The backend starts `resources/arduino-cli
-daemon` and speaks gRPC to it, exactly as the Electron app does. That daemon
-needs a listening socket, so the wasm CLI cannot serve it: the wasm CLI is
-driven through `arduinoCLI.call` by this project's page instead.
-
-This was verified as far as this sandbox allows: the backend bundle boots,
-resolves the CLI, and stops at `listen EACCES: permission denied
-127.0.0.1:3111`. No process here may bind a socket (`python3` and `node` both
-fail), so the IDE server cannot be started and the rendered UI is unverified.
-
-Making it static is a separate job: it means replacing the backend RPC with
-in-page implementations of the `common/protocol` services, backed by the wasm
-CLI and `web/nodefs.js`. Nothing in the frontend bundle prevents that; the
-handlers are simply not written yet.
+That backend starts `resources/arduino-cli daemon` and speaks gRPC to it,
+exactly as the Electron app does, so it needs a listening socket (`python3` and
+`node` both fail to bind here with `EACCES`). The in-page backend is the route
+that needs no socket, and the page is served from the filesystem while testing.
 
 ## Serving
 
@@ -323,6 +363,7 @@ node test/page.mjs           # the page itself, headless
 python3 test/serve_test.py   # the static server's headers
 python3 test/gateway_test.py # the CORS gateway, over a socket pair
 node test/gateway.mjs        # the gateway URL rewrite in Go's transport
+node test/ide.mjs            # the real IDE frontend, headless Chrome, needs a build
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
@@ -341,6 +382,17 @@ and the real filesystem shim, then presses the buttons: update indexes, search
 and install a core, search and install a library, list what is installed,
 identify a board from a fake WebSerial port, and save index settings.
 
+`test/ide.mjs` boots the built IDE frontend in headless Chrome over a CDP pipe
+and asserts what the app itself reports: the shell has body text, the title
+names the IDE, the in-page backend is installed, RPC calls were answered, the
+toolbar says `Select Board`, a `.ino` is open in the editor, and the workbench
+logged the transition to `ready`. `test/cdp.mjs` is the driver: it reads
+commands on fd 3 and replies on fd 4, never rejects (a dead renderer still
+yields its console), and enables `Inspector` so a renderer crash is recorded.
+The test exits 2 when Chrome or `build/ide-dist/frontend/index.html` is absent.
+It fails six checks when the in-page install line is removed; that was planted
+and measured.
+
 `test/serve_test.py` drives the real handler over a socket pair and checks the
 wasm content type and the no-store header.
 
@@ -358,9 +410,9 @@ decodes back to the real URL, while the second instance shows requests going
 direct when the variable is absent. It fails when the transport wrapper is
 removed: that was planted and measured, 6 failed checks.
 
-None of these run a browser. CORS, WebSerial against real hardware, IndexedDB
-persistence across reloads, and layout are not covered here; there is no browser
-in the environment these tests were written in.
+None of these but `test/ide.mjs` run a browser. CORS against the real origins,
+WebSerial against real hardware, IndexedDB persistence across reloads, and
+layout beyond the checks above are not covered here.
 
 The fixture index and its archives are generated, not committed:
 `test/fixtures.py` writes them, and the first test run does it automatically.

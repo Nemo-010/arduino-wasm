@@ -163,11 +163,58 @@ def build_natives(root, env, force):
             BUILD / "ide-ripgrep.log", "@vscode/ripgrep postinstall")
 
 
+def install_inpage(app):
+    # The in-page backend replaces Theia's backend transport inside the frontend
+    # bundle. Copied rather than kept in the clone so re-cloning upstream does
+    # not lose it.
+    src, dst = ROOT / "ide/inpage", app / "inpage"
+    for module in sorted(src.glob("*.js")):
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(module, dst / module.name)
+    print("  => inpage modules: %d" % len(list(dst.glob("*.js"))))
+
+
+def patch_entry(app):
+    # `theia build` regenerates src-gen/, so this runs afterwards. The insertion
+    # asserts its match count: an upstream change to the generated entry must
+    # stop the build, not silently ship a page with no backend.
+    entry = app / "src-gen/frontend/index.js"
+    text = entry.read_text()
+
+    def replace_once(old, new):
+        nonlocal text
+        if new in text:
+            return
+        count = text.count(old)
+        if count != 1:
+            die("%s: expected 1 occurrence of %r, found %d" % (entry, old, count))
+        text = text.replace(old, new)
+
+    replace_once(
+        "    container.load(messagingFrontendModule);",
+        "    container.load(messagingFrontendModule);\n"
+        "    require('../../inpage/inpage-backend-module');\n"
+        "    require('../../inpage/inpage-backend-module').install(container);",
+    )
+    entry.write_text(text)
+    print("  => entry patched: %d hooks" % text.count("inpage-backend-module"))
+
+
+def rebundle_frontend(app, env):
+    # Only the frontend entry changed, and its filesystem cache is warm: this is
+    # seconds, where a second `theia build` is minutes.
+    run([which(env, "webpack"), "--config", "gen-webpack.config.js"], app, env,
+        BUILD / "ide-rebundle.log", "webpack frontend")
+
+
 def build_app(app, env):
     # Theia's own flag is --app-target (values: browser|electron); --target is
     # forwarded to webpack, which only knows web/node/electron-main.
     run([which(env, "theia"), "build", "--app-target=browser"], app, env,
         BUILD / "ide-webpack.log", "theia build --app-target=browser")
+    install_inpage(app)
+    patch_entry(app)
+    rebundle_frontend(app, env)
 
 
 def collect(app, out, tag, node):
