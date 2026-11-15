@@ -12,7 +12,7 @@ import { createNodeFS, MemoryBackend } from "../web/nodefs.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const web = path.join(here, "..", "web");
 
-export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}, debug = false, fetch } = {}) {
+export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}, debug = false, fetch, wasm: wasmFile } = {}) {
   const lines = [];
   const tee = (stream, sink) => (text) => {
     for (const line of text.split("\n")) {
@@ -53,7 +53,7 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
     globalThis.arduinoCLIReady = resolve;
   });
 
-  const wasm = await readFile(path.join(web, "arduino-cli.wasm"));
+  const wasm = await readFile(wasmFile || path.join(web, "arduino-cli.wasm"));
   const { instance } = await WebAssembly.instantiate(wasm, go.importObject);
   go.run(instance).catch((error) => {
     console.error("go.run rejected:", error);
@@ -62,12 +62,39 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
 
   return {
     call,
+    callBinary,
     shim,
     lines,
     dump() {
       return lines.map((l) => `${l.stream}: ${l.line}`).join("\n");
     },
   };
+
+  // callBinary carries the same events with protobuf binary instead of JSON,
+  // which is what the IDE's generated client sends and expects. The payload
+  // stays base64 so the caller can hand it to the generated message class.
+  function callBinary(method, requestBase64, { timeoutMs = 120000, onEvent } = {}) {
+    return new Promise((resolve, reject) => {
+      const events = [];
+      const timer = setTimeout(() => {
+        reject(new Error(`${method}: timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      globalThis.arduinoCLI.callBinary(method, requestBase64, (raw) => {
+        const event = JSON.parse(raw);
+        events.push(event);
+        onEvent?.(event);
+        if (event.type === "error") {
+          clearTimeout(timer);
+          const error = new Error(`${method}: ${event.message}`);
+          error.events = events;
+          reject(error);
+        } else if (event.type === "done") {
+          clearTimeout(timer);
+          resolve(events);
+        }
+      });
+    });
+  }
 
   function call(method, request, { timeoutMs = 120000, onEvent } = {}) {
     return new Promise((resolve, reject) => {

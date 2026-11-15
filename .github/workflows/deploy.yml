@@ -70,6 +70,19 @@ jobs:
       - name: Test the page's nRF52 compile
         run: node test/page-nrf52.mjs
 
+      # The IDE's own client transport and its own service classes, against the wasm
+      # the page ships. The tests build the same bridge the page loads, so a change
+      # that only works against a hand-built wasm fails here.
+      - name: Test the IDE client transport
+        run: node test/ide-client.mjs
+        env:
+          ARDUINO_WASM_BIN: web/arduino-cli.wasm
+
+      - name: Test the IDE's own backend services
+        run: node test/ide-services.mjs
+        env:
+          ARDUINO_WASM_BIN: web/arduino-cli.wasm
+
       - name: Test the static server
         run: python3 test/serve_test.py
 

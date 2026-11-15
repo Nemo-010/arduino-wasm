@@ -556,6 +556,54 @@ One boot error is a real gap, not a stub: `A resource provider for
 `c.loadModel`, which leaves the keymaps editor without a model. The other two
 are `Canceled: Canceled` from model disposal.
 
+### The transport the IDE's own services need
+
+The eight CLI-backed services listed above are still the page's own answers. The
+first half of replacing them is the transport, and it is measured.
+
+`ide/inpage/cli-client.mjs` builds an object shaped like the gRPC client those
+services call, out of the service definition the shipped build already contains:
+it reads `commands_grpc_pb.js`, takes each method's Go name from the last segment
+of its `path` (the definition's `originalName` is `undefined` and its type names
+are empty strings), and sends it through the wasm bridge's `arduinoCLI.callBinary`.
+Both directions are protobuf binary: the vendored `jspb` messages serialize with
+`serializeBinary` and have no `fromObject`, and the desktop client speaks binary
+too, so no JSON path is invented.
+
+`overlay/wasm/main.go` gained `callBinary` beside `call` and a second `transport`
+value beside the protojson one; every streaming handler is shared by both, so a
+new RPC needs no bridge change for the unary case (dispatch is by reflection on
+the real `ArduinoCoreServer`) and one entry in `streamHandlers` otherwise.
+
+A gRPC stream carries the RPC's **response** message, never the bare inner
+progress message. The bridge wraps each inner message in the response by finding
+the field whose message type has the same full name, and fails loudly when no
+field matches. Without that, a `PlatformInstall` stream delivers a
+`TaskProgress`, and the generated client deserializes it as a
+`PlatformInstallResponse` and throws inside `google-protobuf`.
+
+Measured 2026-11-15 with `node test/ide-client.mjs` against the wasm built from
+`v1.6.0`: 11 checks over unary calls (`Version`, `ConfigurationOpen`, `Create`,
+`BoardListAll`, `BoardIdentify`, `LibraryList`) and streams (`Init`,
+`PlatformInstall`, `UpdateLibrariesIndex`, `LibraryInstall`), 61 s including the
+wasm start.
+
+`node test/ide-services.mjs` goes further: it instantiates the extension's own
+compiled classes from `lib/node`, with the only substitution being where they get
+their client — a provider whose `client` resolves to this one instead of a gRPC
+channel to a spawned daemon. `BoardsServiceImpl.getInstalledPlatforms()` returns
+`testpkg:avr`, `getInstalledBoards()` returns `Test Board`, its `search` reaches
+`boardSearch`; `LibraryServiceImpl` searches the fixture index, installs
+`TestLib` through the real `install` path (which stops and starts board discovery
+on the way), and lists it afterwards. Five checks, and the page's remaining work
+is the bundle that puts these classes in the browser.
+
+Not done yet, and named as such: the classes are not bundled for the browser and
+not registered on the in-page channel, so the frontend still talks to
+`ide/inpage/services.js`; `CoreServiceImpl` and the sketches and examples
+services are unproven, because they write files through Node's `fs`; upload and
+WebUSB remain untested.
+
 Running the Electron-shaped server is still possible and still the reference
 path:
 
@@ -601,6 +649,8 @@ python3 test/serve_test.py   # the static server's headers
 python3 test/gateway_test.py # the CORS gateway, over a socket pair
 node test/gateway.mjs        # the gateway URL rewrite in Go's transport
 node test/ide.mjs            # the real IDE frontend, headless Chrome, needs a build
+node test/ide-client.mjs     # the IDE's gRPC client, over the wasm bridge
+node test/ide-services.mjs   # the IDE's own backend service classes
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
@@ -672,8 +722,11 @@ stubbed XHR, so none of them can say whether the page served by Pages loads its
 own assets and its shipped indexes. This one loads the deployed URL in headless
 Chrome, presses **Install Seeeduino:nrf52** once, compiles, and asserts the
 flash line, the `.hex` download, no uncaught exception, and that the only failed
-request is the library index on `downloads.arduino.cc`, which sends no CORS
-header to this page. It needs the Electrosphere, so it runs only with
+request is the library index on `downloads.arduino.cc`, which this page cannot
+read. Its cause was not established: the host answers this sandbox with `403`
+from Cloudflare before any header is sent, so whether a browser elsewhere is
+refused by CORS or by the host's IP reputation is unmeasured, and Chrome reports
+both as `net::ERR_FAILED`. It needs the Electrosphere, so it runs only with
 `NETWORK=1` and exits 2 without it:
 `NETWORK=1 node test/live.mjs [url]`. It starts from a fresh Chrome profile
 every run, because the platform lives in IndexedDB and a profile that kept it

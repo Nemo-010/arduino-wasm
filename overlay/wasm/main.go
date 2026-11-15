@@ -1,7 +1,9 @@
 // Command wasm exposes the arduino-cli gRPC service to JavaScript.
 //
 // It is a thin bridge, not a reimplementation: every request and response is
-// the real protobuf message from the arduino-cli API, encoded as protojson.
+// the real protobuf message from the arduino-cli API. The same handlers serve
+// two encodings: protojson, for the page that speaks JSON, and protobuf binary,
+// for the IDE's own generated gRPC client.
 // Unary RPCs are dispatched by reflection over the real service
 // implementation, so a new unary RPC added upstream works without a change
 // here. Streaming RPCs use the callback adapters that arduino-cli already
@@ -10,6 +12,7 @@
 // The JavaScript side calls:
 //
 //	arduinoCLI.call(method, requestJSON, callback)
+//	arduinoCLI.callBinary(method, requestBase64, callback)
 //
 // and receives, in order, zero or more event objects and exactly one terminal
 // object:
@@ -28,6 +31,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,6 +46,9 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 var (
@@ -53,9 +60,20 @@ var (
 
 type emitter func(eventType string, msg proto.Message)
 
+// decode fills a request message from whichever wire encoding the caller used.
+type decode func(proto.Message) error
+
+// transport pairs the decoder for a call's request with the emitter for its
+// responses, so that one handler serves both encodings.
+type transport struct {
+	decode decode
+	emit   emitter
+}
+
 func main() {
 	api := js.Global().Get("Object").New()
 	api.Set("call", js.FuncOf(jsCall))
+	api.Set("callBinary", js.FuncOf(jsCallBinary))
 	js.Global().Set("arduinoCLI", api)
 
 	// Signals to the page that the module is instantiated and the API exists.
@@ -72,12 +90,87 @@ func jsCall(this js.Value, args []js.Value) any {
 	requestJSON := args[1].String()
 	callback := args[2]
 
-	go run(name, requestJSON, callback)
+	go run(name, jsonTransport(requestJSON, callback), callback)
 
 	return nil
 }
 
-func run(name, requestJSON string, callback js.Value) {
+// jsCallBinary is the same call carried as protobuf binary, which is what the
+// IDE's generated client serializes and deserializes.
+func jsCallBinary(this js.Value, args []js.Value) any {
+	if len(args) != 3 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString || args[2].Type() != js.TypeFunction {
+		return errorEvent(args, fmt.Errorf("usage: callBinary(method, requestBase64, callback)"))
+	}
+	name := args[0].String()
+	request, err := base64.StdEncoding.DecodeString(args[1].String())
+	if err != nil {
+		return errorEvent(args, fmt.Errorf("%s: request is not base64: %w", name, err))
+	}
+	callback := args[2]
+	response, _ := responseDescriptor(name)
+
+	go run(name, binaryTransport(request, response, callback), callback)
+
+	return nil
+}
+
+func jsonTransport(requestJSON string, callback js.Value) transport {
+	return transport{
+		decode: func(msg proto.Message) error {
+			return protojson.Unmarshal([]byte(requestJSON), msg)
+		},
+		emit: func(eventType string, msg proto.Message) {
+			emitProto(callback, eventType, msg)
+		},
+	}
+}
+
+func binaryTransport(request []byte, response protoreflect.MessageDescriptor, callback js.Value) transport {
+	return transport{
+		decode: func(msg proto.Message) error {
+			return proto.Unmarshal(request, msg)
+		},
+		emit: func(eventType string, msg proto.Message) {
+			emitBinary(callback, eventType, msg, response)
+		},
+	}
+}
+
+// responseDescriptor names the message a streaming RPC carries on the wire.
+// Every arduino-cli RPC names it after itself, so the type is resolvable without
+// a table; a unary RPC gets its response type by reflection instead.
+func responseDescriptor(name string) (protoreflect.MessageDescriptor, bool) {
+	full := protoreflect.FullName("cc.arduino.cli.commands.v1." + name + "Response")
+	message, err := protoregistry.GlobalTypes.FindMessageByName(full)
+	if err != nil {
+		return nil, false
+	}
+	return message.Descriptor(), true
+}
+
+// wrapResponse puts a progress or task message into the response message the RPC
+// actually streams. A gRPC client sees, for example, a PlatformInstallResponse
+// whose task_progress is set, not a bare TaskProgress; without this the generated
+// client deserializes the inner message as its outer type.
+func wrapResponse(response protoreflect.MessageDescriptor, inner proto.Message) (proto.Message, error) {
+	wrapped := dynamicpb.NewMessage(response)
+	innerName := inner.ProtoReflect().Descriptor().FullName()
+	fields := response.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		field := fields.Get(i)
+		if field.Kind() != protoreflect.MessageKind && field.Kind() != protoreflect.GroupKind {
+			continue
+		}
+		if field.Message().FullName() != innerName {
+			continue
+		}
+		wrapped.Set(field, protoreflect.ValueOfMessage(inner.ProtoReflect()))
+		return wrapped, nil
+	}
+	return nil, fmt.Errorf("no field of %s carries a %s", response.FullName(), innerName)
+}
+
+func run(name string, tr transport, callback js.Value) {
 	defer func() {
 		if r := recover(); r != nil {
 			send(callback, map[string]any{
@@ -89,11 +182,9 @@ func run(name, requestJSON string, callback js.Value) {
 
 	var err error
 	if handler, ok := streamHandlers[name]; ok {
-		err = handler(requestJSON, func(eventType string, msg proto.Message) {
-			emitProto(callback, eventType, msg)
-		})
+		err = handler(tr.decode, tr.emit)
 	} else {
-		err = invokeUnary(name, requestJSON, callback)
+		err = invokeUnary(name, tr)
 	}
 	if err != nil {
 		send(callback, map[string]any{"type": "error", "message": errorText(err)})
@@ -102,7 +193,7 @@ func run(name, requestJSON string, callback js.Value) {
 	send(callback, map[string]any{"type": "done"})
 }
 
-func invokeUnary(name, requestJSON string, callback js.Value) error {
+func invokeUnary(name string, tr transport) error {
 	method := reflect.ValueOf(srv).MethodByName(name)
 	if !method.IsValid() {
 		return fmt.Errorf("unknown RPC %q", name)
@@ -117,7 +208,7 @@ func invokeUnary(name, requestJSON string, callback js.Value) error {
 	if !ok {
 		return fmt.Errorf("%q has an unsupported request type", name)
 	}
-	if err := protojson.Unmarshal([]byte(requestJSON), msg); err != nil {
+	if err := tr.decode(msg); err != nil {
 		return fmt.Errorf("%q: invalid request: %w", name, err)
 	}
 
@@ -129,8 +220,30 @@ func invokeUnary(name, requestJSON string, callback js.Value) error {
 	if !ok {
 		return fmt.Errorf("%q has an unsupported response type", name)
 	}
-	emitProto(callback, "result", response)
+	tr.emit("result", response)
 	return nil
+}
+
+// emitBinary is emitProto's protobuf counterpart: the same message unencoded,
+// for a client that deserializes it with the generated message class.
+func emitBinary(callback js.Value, eventType string, msg proto.Message, response protoreflect.MessageDescriptor) {
+	if response != nil && msg.ProtoReflect().Descriptor().FullName() != response.FullName() {
+		wrapped, err := wrapResponse(response, msg)
+		if err != nil {
+			send(callback, map[string]any{"type": "error", "message": err.Error()})
+			return
+		}
+		msg = wrapped
+	}
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		send(callback, map[string]any{"type": "error", "message": err.Error()})
+		return
+	}
+	send(callback, map[string]any{
+		"type":   eventType,
+		"binary": base64.StdEncoding.EncodeToString(data),
+	})
 }
 
 func emitProto(callback js.Value, eventType string, msg proto.Message) {
@@ -166,14 +279,7 @@ func errorEvent(args []js.Value, err error) any {
 	return nil
 }
 
-type streamHandler func(requestJSON string, emit emitter) error
-
-func unmarshal(requestJSON string, msg proto.Message) error {
-	if err := protojson.Unmarshal([]byte(requestJSON), msg); err != nil {
-		return fmt.Errorf("invalid request: %w", err)
-	}
-	return nil
-}
+type streamHandler func(decode decode, emit emitter) error
 
 func downloadEmitter(emit emitter) rpc.DownloadProgressCB {
 	return func(p *rpc.DownloadProgress) { emit("progress", p) }
@@ -205,9 +311,9 @@ func (s *compileStream) RecvMsg(any) error                 { return io.EOF }
 var _ grpc.ServerStreamingServer[rpc.CompileResponse] = (*compileStream)(nil)
 
 var streamHandlers = map[string]streamHandler{
-	"Compile": func(reqJSON string, emit emitter) error {
+	"Compile": func(decode decode, emit emitter) error {
 		var req rpc.CompileRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := &compileStream{send: func(m *rpc.CompileResponse) error {
@@ -216,9 +322,9 @@ var streamHandlers = map[string]streamHandler{
 		}}
 		return srv.Compile(&req, stream)
 	},
-	"Init": func(reqJSON string, emit emitter) error {
+	"Init": func(decode decode, emit emitter) error {
 		var req rpc.InitRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.InitStreamResponseToCallbackFunction(ctx, func(r *rpc.InitResponse) error {
@@ -227,9 +333,9 @@ var streamHandlers = map[string]streamHandler{
 		})
 		return srv.Init(&req, stream)
 	},
-	"UpdateIndex": func(reqJSON string, emit emitter) error {
+	"UpdateIndex": func(decode decode, emit emitter) error {
 		var req rpc.UpdateIndexRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream, result := commands.UpdateIndexStreamResponseToCallbackFunction(ctx, downloadEmitter(emit))
@@ -241,9 +347,9 @@ var streamHandlers = map[string]streamHandler{
 		}
 		return nil
 	},
-	"UpdateLibrariesIndex": func(reqJSON string, emit emitter) error {
+	"UpdateLibrariesIndex": func(decode decode, emit emitter) error {
 		var req rpc.UpdateLibrariesIndexRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream, result := commands.UpdateLibrariesIndexStreamResponseToCallbackFunction(ctx, downloadEmitter(emit))
@@ -255,33 +361,33 @@ var streamHandlers = map[string]streamHandler{
 		}
 		return nil
 	},
-	"PlatformInstall": func(reqJSON string, emit emitter) error {
+	"PlatformInstall": func(decode decode, emit emitter) error {
 		var req rpc.PlatformInstallRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.PlatformInstallStreamResponseToCallbackFunction(ctx, downloadEmitter(emit), taskEmitter(emit))
 		return srv.PlatformInstall(&req, stream)
 	},
-	"PlatformDownload": func(reqJSON string, emit emitter) error {
+	"PlatformDownload": func(decode decode, emit emitter) error {
 		var req rpc.PlatformDownloadRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.PlatformDownloadStreamResponseToCallbackFunction(ctx, downloadEmitter(emit))
 		return srv.PlatformDownload(&req, stream)
 	},
-	"PlatformUninstall": func(reqJSON string, emit emitter) error {
+	"PlatformUninstall": func(decode decode, emit emitter) error {
 		var req rpc.PlatformUninstallRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.PlatformUninstallStreamResponseToCallbackFunction(ctx, taskEmitter(emit))
 		return srv.PlatformUninstall(&req, stream)
 	},
-	"PlatformUpgrade": func(reqJSON string, emit emitter) error {
+	"PlatformUpgrade": func(decode decode, emit emitter) error {
 		var req rpc.PlatformUpgradeRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream, result := commands.PlatformUpgradeStreamResponseToCallbackFunction(ctx, downloadEmitter(emit), taskEmitter(emit))
@@ -293,57 +399,57 @@ var streamHandlers = map[string]streamHandler{
 		}
 		return nil
 	},
-	"LibraryInstall": func(reqJSON string, emit emitter) error {
+	"LibraryInstall": func(decode decode, emit emitter) error {
 		var req rpc.LibraryInstallRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.LibraryInstallStreamResponseToCallbackFunction(ctx, downloadEmitter(emit), taskEmitter(emit))
 		return srv.LibraryInstall(&req, stream)
 	},
-	"LibraryDownload": func(reqJSON string, emit emitter) error {
+	"LibraryDownload": func(decode decode, emit emitter) error {
 		var req rpc.LibraryDownloadRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.LibraryDownloadStreamResponseToCallbackFunction(ctx, downloadEmitter(emit))
 		return srv.LibraryDownload(&req, stream)
 	},
-	"LibraryUninstall": func(reqJSON string, emit emitter) error {
+	"LibraryUninstall": func(decode decode, emit emitter) error {
 		var req rpc.LibraryUninstallRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.LibraryUninstallStreamResponseToCallbackFunction(ctx, taskEmitter(emit))
 		return srv.LibraryUninstall(&req, stream)
 	},
-	"LibraryUpgrade": func(reqJSON string, emit emitter) error {
+	"LibraryUpgrade": func(decode decode, emit emitter) error {
 		var req rpc.LibraryUpgradeRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.LibraryUpgradeStreamResponseToCallbackFunction(ctx, downloadEmitter(emit), taskEmitter(emit))
 		return srv.LibraryUpgrade(&req, stream)
 	},
-	"LibraryUpgradeAll": func(reqJSON string, emit emitter) error {
+	"LibraryUpgradeAll": func(decode decode, emit emitter) error {
 		var req rpc.LibraryUpgradeAllRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.LibraryUpgradeAllStreamResponseToCallbackFunction(ctx, downloadEmitter(emit), taskEmitter(emit))
 		return srv.LibraryUpgradeAll(&req, stream)
 	},
-	"ZipLibraryInstall": func(reqJSON string, emit emitter) error {
+	"ZipLibraryInstall": func(decode decode, emit emitter) error {
 		var req rpc.ZipLibraryInstallRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.ZipLibraryInstallStreamResponseToCallbackFunction(ctx, taskEmitter(emit))
 		return srv.ZipLibraryInstall(&req, stream)
 	},
-	"GitLibraryInstall": func(reqJSON string, emit emitter) error {
+	"GitLibraryInstall": func(decode decode, emit emitter) error {
 		var req rpc.GitLibraryInstallRequest
-		if err := unmarshal(reqJSON, &req); err != nil {
+		if err := decode(&req); err != nil {
 			return err
 		}
 		stream := commands.GitLibraryInstallStreamResponseToCallbackFunction(ctx, taskEmitter(emit))
