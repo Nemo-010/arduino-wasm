@@ -237,6 +237,118 @@ def vendor_pb(src, env):
     log("vendored github.com/cmaglie/pb with a js terminalWidth")
 
 
+def vendor_paths_helper(src, env):
+    """Give go-paths-helper's Process a way to run a command without the OS.
+
+    Every external command arduino-cli runs (compiler, ctags, ar, objcopy) goes
+    through paths.Process, which is a thin wrapper around os/exec. Under js there
+    is no os/exec, so the wrapper needs one hook points that a page can fill: it
+    keeps the library stock and adds a var that Start consults.
+
+    The library is vendored into third_party/ and patched here, with an asserted
+    replacement count for each edit, so an upstream change fails the build
+    instead of silently producing a wasm that cannot compile anything.
+    """
+    gomod = os.path.join(src, "go.mod")
+    with open(gomod) as handle:
+        text = handle.read()
+    marker = "replace github.com/arduino/go-paths-helper => ./third_party/go-paths-helper"
+    stripped = "\n".join(line for line in text.splitlines() if "=> ./third_party/go-paths-helper" not in line)
+    with open(gomod, "w") as handle:
+        handle.write(stripped)
+
+    module_dir = module_dir_of(src, env, "github.com/arduino/go-paths-helper")
+    target = os.path.join(src, "third_party", "go-paths-helper")
+    if os.path.isdir(target):
+        for directory, dirs, files in os.walk(target):
+            os.chmod(directory, 0o755)
+            for name in files:
+                os.chmod(os.path.join(directory, name), 0o644)
+        shutil.rmtree(target)
+    shutil.copytree(module_dir, target, ignore=shutil.ignore_patterns(".git"))
+    for directory, dirs, files in os.walk(target):
+        os.chmod(directory, 0o755)
+        for name in files:
+            os.chmod(os.path.join(directory, name), 0o644)
+
+    path = os.path.join(target, "process.go")
+    with open(path) as handle:
+        text = handle.read()
+
+    if "RunExternal" in text:
+        log("go-paths-helper already patched")
+    else:
+        replacements = [
+            (
+                "type Process struct {\n\tcmd *exec.Cmd\n}",
+                "type Process struct {\n"
+                "\tcmd *exec.Cmd\n"
+                "\n"
+                "\t// Set when RunExternal handled the command, so Wait reports its\n"
+                "\t// result instead of waiting for a process that never started.\n"
+                "\texternalDone bool\n"
+                "\texternalErr  error\n"
+                "}\n"
+                "\n"
+                "// RunExternal, when not nil, runs a command instead of the operating\n"
+                "// system and reports whether it handled it. A wasm build installs one\n"
+                "// because it has no processes to start: the command runs in the page.\n"
+                "var RunExternal func(cmd *exec.Cmd) (handled bool, err error)",
+            ),
+            (
+                "func (p *Process) Start() error {\n\treturn p.cmd.Start()\n}",
+                "func (p *Process) Start() error {\n"
+                "\tif RunExternal != nil {\n"
+                "\t\tif handled, err := RunExternal(p.cmd); handled {\n"
+                "\t\t\tp.externalDone, p.externalErr = true, err\n"
+                "\t\t\treturn nil\n"
+                "\t\t}\n"
+                "\t}\n"
+                "\treturn p.cmd.Start()\n}",
+            ),
+            (
+                "func (p *Process) Wait() error {\n"
+                "\t// TODO: make some helpers to retrieve exit codes out of *ExitError.\n"
+                "\treturn p.cmd.Wait()\n}",
+                "func (p *Process) Wait() error {\n"
+                "\t// TODO: make some helpers to retrieve exit codes out of *ExitError.\n"
+                "\tif p.externalDone {\n"
+                "\t\treturn p.externalErr\n"
+                "\t}\n"
+                "\treturn p.cmd.Wait()\n}",
+            ),
+            (
+                "func (p *Process) Kill() error {\n\treturn kill(p.cmd)\n}",
+                "func (p *Process) Kill() error {\n"
+                "\tif p.externalDone {\n"
+                "\t\treturn nil\n"
+                "\t}\n"
+                "\treturn kill(p.cmd)\n}",
+            ),
+            (
+                "func (p *Process) Signal(sig os.Signal) error {\n\treturn p.cmd.Process.Signal(sig)\n}",
+                "func (p *Process) Signal(sig os.Signal) error {\n"
+                "\tif p.externalDone {\n"
+                "\t\treturn nil\n"
+                "\t}\n"
+                "\treturn p.cmd.Process.Signal(sig)\n}",
+            ),
+        ]
+        for old, new in replacements:
+            if text.count(old) != 1:
+                sys.exit(
+                    "go-paths-helper/process.go changed upstream; "
+                    "expected exactly one occurrence of: " + old.splitlines()[0]
+                )
+            text = text.replace(old, new)
+        with open(path, "w") as handle:
+            handle.write(text)
+        log("patched go-paths-helper/process.go for RunExternal")
+
+    with open(gomod, "w") as handle:
+        handle.write(stripped.rstrip("\n") + "\n" + marker + "\n")
+
+
 def build(src, env):
     os.makedirs(WEB, exist_ok=True)
     wasm = os.path.join(WEB, "arduino-cli.wasm")
@@ -305,6 +417,7 @@ def main():
     patch_tool_host(src)
     patch_cors_gateway(src)
     vendor_pb(src, env)
+    vendor_paths_helper(src, env)
     wasm = build(src, env)
 
     version = (tag or "unknown") + " " + git(src, "rev-parse", "--short", "HEAD")
