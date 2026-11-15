@@ -5,6 +5,7 @@
 // CLI. Everything else is the CLI's own work.
 
 import { createNodeFS, IdbBackend, MemoryBackend, deleteDatabase } from "./nodefs.js";
+import { AVR_INDEX_URL, installIndexShim, installPageAvr } from "./page-avr.js";
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -119,7 +120,13 @@ function settingsYaml(config) {
 
 async function boot() {
   const config = readConfig();
-  $("index-default").value = config.defaultIndex;
+  // Blank means "the index this page carries". Arduino's own index cannot be
+  // reached from a page anyway (it sends no access-control-allow-origin), and
+  // the CLI reads the URL out of the index verbatim, so the shipped index has
+  // to come from this page's own directory.
+  const defaultIndex = config.defaultIndex || AVR_INDEX_URL;
+  installIndexShim();
+  $("index-default").value = defaultIndex;
   $("index-extra").value = config.extraIndexes;
   $("index-library").value = config.libraryIndex;
 
@@ -141,12 +148,18 @@ async function boot() {
   globalThis.path = shim.path;
   globalThis.process = shim.process;
 
+  // Before the CLI runs: a compile asks arduinoExec for every tool it wants, and
+  // answering "not implemented on js" is only correct when the toolchain is
+  // genuinely absent.
+  installPageAvr({ nodefs: shim, log });
+
   // wasm_exec.js is a classic script, already loaded by the page. It installs
   // globalThis.Go and leaves our fs/path/process alone because they exist.
   const go = new globalThis.Go();
   go.argv = ["arduino-cli"];
   go.env = { HOME: "/home/arduino", TMPDIR: "/tmp", PATH: "/bin" };
-  if (config.defaultIndex) go.env.ARDUINO_DEFAULT_INDEX_URL = config.defaultIndex;
+  // Always set: defaultIndex falls back to the index this page carries.
+  go.env.ARDUINO_DEFAULT_INDEX_URL = defaultIndex;
   if (config.libraryIndex) go.env.ARDUINO_LIBRARIES_INDEX_URL = config.libraryIndex;
   // Read once, at startup: the Go js ABI copies the environment into linear
   // memory when the program starts, so this cannot be changed afterwards.
@@ -466,6 +479,155 @@ async function identifyBoard() {
 }
 
 // ---------------------------------------------------------------------------
+// Compile
+
+// web/nodefs.js is callback-based; the page needs whole-file operations.
+function fsCall(target, method, ...args) {
+  return new Promise((resolve, reject) => {
+    target[method](...args, (error, value) => (error ? reject(error) : resolve(value)));
+  });
+}
+
+// protojson carries the byte streams as base64; the compiler writes UTF-8.
+function b64text(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+const SKETCH_DIR = "/home/arduino/Sketch";
+const SKETCH_FILE = SKETCH_DIR + "/Sketch.ino";
+
+async function writeSketch(text) {
+  const fs = globalThis.fs;
+  await fsCall(fs, "mkdir", SKETCH_DIR, 0o755).catch(() => undefined);
+  const fd = await fsCall(fs, "open", SKETCH_FILE, "w", 0o644);
+  const bytes = new TextEncoder().encode(text);
+  try {
+    await fsCall(fs, "write", fd, bytes, 0, bytes.length, 0);
+  } finally {
+    await fsCall(fs, "close", fd);
+  }
+}
+
+// The install button asks the index which release is newest by passing an empty
+// version, which parseVersion turns into nil so the package manager picks it.
+async function installAvrCore() {
+  busy(true);
+  $("core-install-avr").disabled = true;
+  log("Installing arduino:avr");
+  try {
+    await call("PlatformInstall", {
+      instance,
+      platformPackage: "arduino",
+      architecture: "avr",
+      version: "",
+      skipPostInstall: true,
+    });
+    log("Installed arduino:avr", "ok");
+    await init();
+  } catch (error) {
+    log(`  ${error.message}`, "err");
+  }
+  $("core-install-avr").disabled = false;
+  busy(false);
+}
+
+// The build directory is named after a hash of the sketch path, so the page
+// finds the newest one instead of guessing its name.
+async function newestBuildDirectory() {
+  const root = "/home/arduino/.cache/arduino/sketches";
+  let names = [];
+  try {
+    names = await fsCall(globalThis.fs, "readdir", root);
+  } catch (error) {
+    return null;
+  }
+  for (const name of names) {
+    const candidate = root + "/" + name;
+    try {
+      await fsCall(globalThis.fs, "stat", candidate + "/Sketch.ino.elf");
+      return candidate;
+    } catch (error) {
+      // not this one
+    }
+  }
+  return null;
+}
+
+async function readTextFile(target) {
+  const fs = globalThis.fs;
+  const fd = await fsCall(fs, "open", target, "r", 0o644);
+  try {
+    const stat = await fsCall(fs, "fstat", fd);
+    const buffer = new Uint8Array(stat.size);
+    await fsCall(fs, "read", fd, buffer, 0, buffer.length, 0);
+    return new TextDecoder().decode(buffer);
+  } finally {
+    await fsCall(fs, "close", fd);
+  }
+}
+
+async function compileSketch() {
+  const fqbn = $("compile-fqbn").value.trim();
+  const out = $("compile-out");
+  const status = $("compile-status");
+  out.textContent = "";
+  status.textContent = "compiling…";
+  $("hex-download").hidden = true;
+  busy(true);
+
+  const started = Date.now();
+  let text = "";
+  const absorb = (events) => {
+    for (const event of events) {
+      const data = event.data ?? {};
+      if (data.outStream) text += b64text(data.outStream);
+      if (data.errStream) text += b64text(data.errStream);
+      if (typeof data.message === "string") text += data.message + "\n";
+    }
+  };
+  let failed = null;
+  try {
+    await writeSketch($("sketch").value);
+    absorb(await call("Compile", { instance, fqbn, sketchPath: SKETCH_DIR, verbose: true }));
+  } catch (error) {
+    absorb(error.events ?? []);
+    text += (text ? "\n" : "") + error.message;
+    failed = error.message;
+  }
+
+  out.textContent = text.split("\n").slice(-200).join("\n");
+  const seconds = ((Date.now() - started) / 1000).toFixed(1);
+  const size = /Sketch uses (\d+) bytes/.exec(text);
+
+  // A failed compile leaves the previous build directory in place, so the .hex
+  // is only offered when this run produced one.
+  const buildPath = failed ? null : await newestBuildDirectory();
+  if (!buildPath) {
+    status.textContent = `failed after ${seconds} s`;
+    log(`  ${failed ?? "no ELF was produced"}`, "err");
+    busy(false);
+    return;
+  }
+
+  try {
+    const hex = await readTextFile(buildPath + "/Sketch.ino.hex");
+    const link = $("hex-download");
+    link.href = URL.createObjectURL(new Blob([hex], { type: "text/plain" }));
+    link.download = "Sketch.ino.hex";
+    link.hidden = false;
+  } catch (error) {
+    log(`no .hex to download: ${error.message}`, "err");
+  }
+
+  status.textContent = (size ? `${size[1]} bytes of flash, ` : "") + `${seconds} s`;
+  log(`compiled ${fqbn} in ${seconds} s` + (size ? `, ${size[1]} bytes` : ""), "ok");
+  busy(false);
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 
 $("update").onclick = () => updateIndexes().catch((error) => {
@@ -493,6 +655,12 @@ $("library-search").onclick = () => searchLibraries().catch((error) => log(error
 $("library-installed").onclick = () =>
   listInstalledLibraries().catch((error) => log(error.message, "err"));
 $("serial").onclick = () => identifyBoard().catch((error) => log(error.message, "err"));
+$("core-install-avr").onclick = () => installAvrCore();
+$("compile").onclick = () => compileSketch().catch((error) => {
+  $("compile-status").textContent = error.message;
+  log(error.message, "err");
+  busy(false);
+});
 
 boot().catch((error) => {
   setStatus("failed to start");

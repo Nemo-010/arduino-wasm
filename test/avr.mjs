@@ -1,29 +1,33 @@
 // End-to-end AVR compile: the real arduino-cli wasm build, the real AVR
 // platform recipes, and the in-page toolchain answering the exec seam.
 //
-// The platform comes from build/fixtures-avr/ rather than from Arduino's index,
-// because downloads.arduino.cc answers 403 from this machine. Everything below
-// the index — the recipes, the core sources, the checksums, the tool layout —
-// is the real thing, and the toolchain archives in the fixture are dummies that
-// are never executed: the page supplies the compiler.
+// The platform comes from web/indexes/avr/ rather than from Arduino's index,
+// because downloads.arduino.cc answers 403 from this machine. That directory is
+// the same one the page ships, so this test exercises the bytes a browser gets.
+// Everything below the index — the recipes, the core sources, the checksums,
+// the tool layout — is the real thing, and the tool archives the index names
+// are dummies that are never executed: the page supplies the compiler.
 //
 // Exit codes: 0 all checks passed, 1 a check failed, 2 a prerequisite is absent.
 
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { startCLI } from "./harness.mjs";
 import { createAvrExec } from "../web/avr-exec.js";
+import { createAvrAssets } from "../web/avr-assets.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // startCLI replaces globalThis.process with the browser shim, whose exit() is a
 // no-op. Keep the real one, or a failing run would report exit 0.
 const exitProcess = process.exit.bind(process);
 const ROOT = path.join(here, "..");
-const TOOLS = path.join(ROOT, "build/avr-tools");
-const FIXTURE = path.join(ROOT, "build/fixtures-avr");
+const TOOLS = path.join(ROOT, "web/tools/avr");
+const INDEXES = path.join(ROOT, "web/indexes/avr");
 const WASM = path.join(ROOT, "web/arduino-cli.wasm");
+const INDEX_ORIGIN = "https://arduino-wasm.invalid";
+const INDEX_URL = INDEX_ORIGIN + "/indexes/avr/package_index.json";
 
 const checks = [];
 function check(name, ok, detail) {
@@ -40,9 +44,9 @@ async function exists(target) {
   }
 }
 
-for (const required of [WASM, path.join(TOOLS, "cc1plus.wasm"), path.join(TOOLS, "sysroot.tar.gz"), path.join(FIXTURE, "package_index.json")]) {
+for (const required of [WASM, path.join(TOOLS, "cc1plus.wasm.gz"), path.join(TOOLS, "sysroot.tar.gz"), path.join(INDEXES, "package_index.json"), path.join(INDEXES, "avr-1.8.6.tar.bz2")]) {
   if (!(await exists(required))) {
-    console.log("skipped: missing " + path.relative(ROOT, required) + " (run scripts/update.py and test/fixtures-avr.py)");
+    console.log("skipped: missing " + path.relative(ROOT, required) + " (run scripts/update.py, scripts/fetch-avr-tools.py, scripts/make-avr-index.py)");
     process.exit(2);
   }
 }
@@ -50,15 +54,16 @@ for (const required of [WASM, path.join(TOOLS, "cc1plus.wasm"), path.join(TOOLS,
 const realFetch = globalThis.fetch;
 const fixtureFetch = async (url, options) => {
   const parsed = new URL(typeof url === "string" ? url : url.url);
-  if (parsed.host !== "fixture.invalid") return realFetch(url, options);
-  const data = await readFile(path.join(FIXTURE, decodeURIComponent(parsed.pathname)));
+  if (parsed.origin !== INDEX_ORIGIN) return realFetch(url, options);
+  const target = path.join(INDEXES, decodeURIComponent(parsed.pathname).replace(/^\/indexes\/avr\//, ""));
+  const data = await readFile(target);
   return new Response(data, { status: 200, headers: { "content-length": String(data.length) } });
 };
 
 const cli = await startCLI({
   fetch: fixtureFetch,
   env: {
-    ARDUINO_DEFAULT_INDEX_URL: "http://fixture.invalid/package_index.json",
+    ARDUINO_DEFAULT_INDEX_URL: INDEX_URL,
     ARDUINO_TOOL_HOST_OS: "linux",
     ARDUINO_TOOL_HOST_ARCH: "amd64",
   },
@@ -73,10 +78,14 @@ const call = (fn, ...args) =>
 let commands = 0;
 const unanswered = [];
 const notes = [];
+const assets = createAvrAssets({
+  load: (name) => readFile(path.join(TOOLS, name)),
+  importModule: (name) => import(pathToFileURL(path.join(TOOLS, name + ".mjs")).href),
+});
 const exec = createAvrExec({
   nodefs: cli.shim,
-  readAsset: (name) => readFile(path.join(TOOLS, name)),
-  importModule: (name) => import(path.join(TOOLS, name + ".mjs")),
+  readAsset: assets.readAsset,
+  importModule: assets.importModule,
   log: (line) => notes.push(line),
 });
 globalThis.arduinoExec = (request, callback) => {
@@ -208,6 +217,23 @@ if (buildPath) {
   } finally {
     await call(fs.close, hexFd);
   }
+
+  // The eeprom recipe is a second objcopy with --change-section-lma. It once
+  // produced no file at all while the build still reported success, so assert
+  // the artefact by name rather than trusting the exit code.
+  const eepText = await call(fs.open, buildPath + "/Blink.ino.eep", "r", 0o644)
+    .then(async (eepFd) => {
+      try {
+        const eepStat = await call(fs.fstat, eepFd);
+        const buffer = new Uint8Array(eepStat.size);
+        await call(fs.read, eepFd, buffer, 0, buffer.length, 0);
+        return new TextDecoder().decode(buffer);
+      } finally {
+        await call(fs.close, eepFd);
+      }
+    })
+    .catch(() => null);
+  check("the EEPROM image was written", eepText !== null && verifyEEProm(eepText), eepText === null ? "no .eep file" : eepText.length + " bytes");
 }
 
 // An Intel HEX record is ":LLAAAATT<data>CC" and every byte of the record,
@@ -240,6 +266,15 @@ if (hex) {
 } else {
   check("the hex is well-formed Intel HEX", false, "no hex file");
   check("the hex starts with the AVR reset vector", false, "no hex file");
+}
+
+// The eeprom file is Intel HEX too, at address zero, and a sketch with no
+// EEPROM use still gets one: objcopy writes the empty .eeprom section.
+function verifyEEProm(text) {
+  const lines = text.trim().split("\n").map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return false;
+  if (lines[lines.length - 1] !== ":00000001FF") return false;
+  return lines.every((line) => line.startsWith(":") && line.length % 2 === 1);
 }
 
 if (compileError || !sizeLine) {

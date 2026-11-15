@@ -30,21 +30,22 @@ Proven by the tests in this repository, against a real index and real archives:
 - `BoardIdentify` from a USB vendor/product pair, which is what the page feeds
   it from WebSerial.
 - Storage in IndexedDB through `web/nodefs.js`, the same shim the tests use.
+- Compiling a sketch for AVR in the page, producing a `.hex`, with the real
+  builder and the real platform recipes (`test/avr.mjs`, `test/page-compile.mjs`).
 
 ## What does not work
 
-**Compile and upload.** The builder runs the platform's toolchain as a child
-process (`internal/arduino/builder/builder.go:541`, `command.Start()`). A
-WebAssembly module has no `fork`/`exec`. Measured with a ten-line probe that
-calls `exec.Command("/bin/true").Run()` under `GOOS=js`:
+**Upload.** A compile for AVR now finishes in the page (see *Compiling on the
+page*). An upload does not. The last step of an upload recipe is `avrdude`, a
+child process, and `web/avr-driver.js` answers it with a refusal that says so.
+WebSerial can open the port and identify the board; nothing here speaks STK500
+to a board yet.
 
-```
-*fs.PathError: fork/exec /bin/true: not implemented on js
-```
-
-That is a property of the platform, not of this build. Uploading has the same
-shape: `avrdude` and friends are child processes too. WebSerial can open the
-port, but there is no compiler to produce the bytes to send.
+**Compiling for an architecture with no wasm compiler.** The exec seam is the
+only place a toolchain is reached, so a platform compiles on the page when a
+wasm build of its compiler exists, and the same driver shape works for any of
+them. Only AVR has one today. The nRF52 path still stops at the compiler, and
+that is the whole of the remaining gap:
 
 The board run is reproduced by `NETWORK=1 node test/nrf52.mjs`. It adds Seeed's
 board URL, installs `Seeeduino:nrf52@1.1.9`, writes blink and compiles it for
@@ -63,10 +64,10 @@ Everything before that wall worked, against the real servers:
   filesystem: 2,451 core files and 13,905 tool files;
 - the ARM compiler now on disk is a 1,153,656 byte x86-64 ELF, `e_machine 62`.
 
-That last line decides what comes next. A vendor toolchain has no source, so it
-cannot be built to wasm; running it needs a Linux ELF emulator such as gex. The
-binary the installer produced is exactly the shape gex accepts. Until that runs,
-nothing in this project can produce a `.hex` or a `.uf2`.
+That compiler is an x86-64 ELF, and there is no wasm build of
+`arm-none-eabi-gcc` to substitute for it, so this target needs an emulator (gex)
+or a cross-compiler built to wasm. Until one of those exists, nothing on this
+page can compile for the XIAO.
 
 The script exits 0 (compiled), 2 (a download was refused), 3 (reached the
 toolchain and could not start it) or 1 (anything else), so the outcome is
@@ -134,6 +135,86 @@ in a tab, so `Init` reports them as missing. That message is expected. The page
 supplies the vendor and product ids from WebSerial instead, which is enough for
 `BoardIdentify`.
 
+## Compiling on the page
+
+The page compiles AVR sketches. Open it, press **Install arduino:avr**, paste a
+sketch, press **Compile**. The result is a `.hex` you can download, plus the
+CLI's own size report.
+
+Nothing is faked at the CLI's boundary: `arduino-cli` runs its real builder,
+its real recipes on the real platform, and asks for `avr-g++` the same way it
+would on a machine with the toolchain installed. What differs is what answers.
+
+### The seam
+
+The builder starts tools through `go-paths-helper`, a vendored copy of
+`github.com/arduino/go-paths-helper` whose `Process.Start`/`Wait` call a hook
+(`overlay/wasm/exec_js.go`). Under `GOOS=js` that hook hands the command line to
+`globalThis.arduinoExec(request, callback)`. `web/avr-exec.js` installs it,
+`web/avr-driver.js` answers it. Nothing else in the CLI was changed for this.
+
+### The compiler
+
+`web/tools/avr/` holds a wasm build of avr-gcc's own programs — `cc1plus`, `as`,
+`ld`, `objcopy` — collected from `startabit/avr-gcc-wasm`, a wasm build of GCC
+7.3.0 with Arduino's own patch. `scripts/fetch-avr-tools.py` downloads them,
+checks each file against SHA-256 hashes pinned in that script, and fails loudly
+if upstream changes. `web/tools/avr/PROVENANCE.md` records the hashes and the
+release they came from.
+
+Four programs is not a toolchain, so `web/avr-driver.js` supplies the rest, and
+each substitution is a decision with a cost:
+
+| the recipe asks for | what answers | cost |
+| --- | --- | --- |
+| `avr-g++`, `avr-gcc` | the driver: maps `-mmcu=<device>` to the architecture `cc1plus` accepts and the device macro `avr/io.h` selects on | a device absent from `web/avr-mcus.js` fails |
+| `avr-gcc-ar` | the driver records the members; `core.a` is expanded at link time | the archive is not a file the toolchain can inspect |
+| `avr-size` | the driver reads ELF section headers and prints what `avr-size -A` prints | only text and data are reported |
+| `ctags` | a stand-in that exits 0 and prints nothing | a sketch that calls a function before defining it has no prototype and fails |
+| `avrdude` | a refusal | no upload |
+
+`web/avr-mcus.js` is generated, not typed: `scripts/gen-avr-mcus.py` reads
+`avr-mcus.def` from the same GCC release and emits 274 devices across 16
+architectures, with the macro spelling each device selects on.
+
+### The sysroot
+
+The release ships no headers and no libraries, so the page carries
+theirs: `sysroot.tar.gz` contains a GCC sysroot for AVR (avr-libc 2.0.0) and
+Arduino AVR core 1.8.8 with seven libraries, precompiled with Arduino's own
+native avr-gcc. The driver unpacks it into the filesystem on the first tool
+call; it is already committed, so a compile needs no network.
+
+### What it cannot do
+
+- **No C++ standard library in the sysroot** — no `libstdc++.a`, no
+  `avr/include/c++`. The driver compiles with `-fno-rtti`, so `typeid` and
+  `dynamic_cast` do not link. Sketches that avoid them compile.
+- **C files are compiled as C++**, because only `cc1plus` was built to wasm.
+  `-fpermissive` covers most of it. `hooks.c` uses `__attribute__((alias(...)))`,
+  which C++ cannot express on a definition, so the driver rewrites that pattern
+  and logs every rewrite. Any other C construct C++ cannot express fails
+  loudly.
+- **No upload.** `avrdude` is not implemented.
+- **Only AVR.** The seam is general; the toolchain is not.
+
+### The index the page carries
+
+`web/indexes/avr/` holds a package index for `arduino:avr@1.8.6` and the real
+Arduino AVR core archive. Its tool entries are dummy archives that are never
+executed — `web/avr-driver.js` answers every tool call — so the installer finds
+the tools its index promises. `web/indexes/avr/README.md` says so in place.
+
+The index's URLs point at `https://arduino-wasm.invalid/`, a host that does not
+exist. `arduino-cli` uses that URL verbatim, so the page installs a `fetch` shim
+that maps the origin onto its own directory. The shim loads with
+`XMLHttpRequest`, because `fetch` is refused on `file://` and the page has to
+work when someone opens `web/index.html` directly.
+
+That shim is shared with the tests: `test/page-compile.mjs` runs
+`createIndexFetch` with a disk `read` instead of a socket, so a mapping bug
+fails a test rather than a user's compile.
+
 ## Files
 
 ```
@@ -143,7 +224,17 @@ overlay/                    files copied over the upstream clone
 scripts/update.py           clone + patch + build; the only update mechanism
 scripts/serve.py            static server, correct wasm content type
 scripts/build-ide.py        builds the arduino-ide frontend for the browser
+scripts/fetch-avr-tools.py  downloads the wasm AVR toolchain, verifies hashes
+scripts/make-avr-index.py   builds the package index the page installs from
+scripts/gen-avr-mcus.py     generates web/avr-mcus.js from GCC's avr-mcus.def
 web/index.html, app.js      the page
+web/page-avr.js             the page's half of the toolchain: index shim, loader
+web/avr-driver.js           answers avr-g++/ar/size/ctags with wasm tools
+web/avr-exec.js             installs globalThis.arduinoExec over the CLI's seam
+web/avr-assets.js           one asset loader, shared by the page and the tests
+web/avr-mcus.js             generated device to architecture and macro table
+web/tools/avr/              the wasm AVR toolchain, with PROVENANCE.md
+web/indexes/avr/            the package index the page carries, with README.md
 web/nodefs.js               filesystem shim: IndexedDB or memory, callback API
 web/package.json            marks the page's JavaScript as ES modules for Node
 web/arduino-cli.wasm        the build output
@@ -370,6 +461,8 @@ for any other host.
 ```sh
 node test/run.mjs            # the CLI, through the same sequence the IDE uses
 node test/page.mjs           # the page itself, headless
+node test/avr.mjs            # install the AVR core, compile blink, check the hex
+node test/page-compile.mjs   # the same compile through the page's own controls
 python3 test/serve_test.py   # the static server's headers
 python3 test/gateway_test.py # the CORS gateway, over a socket pair
 node test/gateway.mjs        # the gateway URL rewrite in Go's transport
@@ -391,6 +484,21 @@ cannot bind a socket.
 and the real filesystem shim, then presses the buttons: update indexes, search
 and install a core, search and install a library, list what is installed,
 identify a board from a fake WebSerial port, and save index settings.
+
+`test/avr.mjs` compiles a sketch for `arduino:avr:uno` and reads what came out:
+the CLI's own size line, the ELF, the 25 core objects, the EEPROM image, and a
+152-record Intel HEX that starts at the AVR reset vector. It installs the core
+from the same `web/indexes/avr/` the page ships, through an injected `fetch`, so
+the test and the page install the same bytes. It also asserts that no command
+reached a tool the page does not implement.
+
+`test/page-compile.mjs` does the same compile through `web/app.js`'s own
+buttons: install the core from the shipped index, compile the sketch in the
+textarea, and check the size line, the seconds, and the `.hex` the download link
+carries. The page's index shim runs with a disk `read` instead of a socket, so
+the mapping is exercised; the XHR transport itself is the one part a Node test
+cannot reach. Removing the page's toolchain install makes it fail with
+`pipe: not implemented on js` — planted and measured.
 
 `test/ide.mjs` boots the built IDE frontend in headless Chrome over a CDP pipe
 and asserts what the app itself reports: the shell has body text, the title
@@ -424,8 +532,12 @@ direct when the variable is absent. It fails when the transport wrapper is
 removed: that was planted and measured, 6 failed checks.
 
 None of these but `test/ide.mjs` run a browser. CORS against the real origins,
-WebSerial against real hardware, IndexedDB persistence across reloads, and
-layout beyond the checks above are not covered here.
+WebSerial against real hardware, IndexedDB persistence across reloads, the
+browser's own `XMLHttpRequest` over `file://`, and layout beyond the checks
+above are not covered here. The last one is the gap that matters most for the
+compile path: the Node test replaces the browser's XHR with a disk read through
+the same `createIndexFetch` code the page runs, which proves the mapping but not
+the transport.
 
 The fixture index and its archives are generated, not committed:
 `test/fixtures.py` writes them, and the first test run does it automatically.

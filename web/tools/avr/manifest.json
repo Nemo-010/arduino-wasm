@@ -1,0 +1,57 @@
+{
+ "toolchain": "7.3.0-atmel3.6.1-arduino7",
+ "core": "1.8.8",
+ "coreObjects": 25,
+ "libraries": {
+  "Wire": {
+   "version": "1.8.8",
+   "headers": [
+    "Wire.h"
+   ],
+   "archive": true
+  },
+  "SPI": {
+   "version": "1.8.8",
+   "headers": [
+    "SPI.h"
+   ],
+   "archive": true
+  },
+  "SoftwareSerial": {
+   "version": "1.8.8",
+   "headers": [
+    "SoftwareSerial.h"
+   ],
+   "archive": true
+  },
+  "EEPROM": {
+   "version": "1.8.8",
+   "headers": [
+    "EEPROM.h"
+   ],
+   "archive": false
+  },
+  "Servo": {
+   "version": "1.3.0",
+   "headers": [
+    "Servo.h"
+   ],
+   "archive": true
+  },
+  "Adafruit_NeoPixel": {
+   "version": "1.15.5",
+   "headers": [
+    "Adafruit_NeoPixel.h",
+    "rp2040_pio.h"
+   ],
+   "archive": true
+  },
+  "HCSR04": {
+   "version": "2.0.0",
+   "headers": [
+    "HCSR04.h"
+   ],
+   "archive": true
+  }
+ }
+}

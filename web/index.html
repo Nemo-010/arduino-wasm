@@ -122,13 +122,38 @@
       #status {
         color: var(--dim);
       }
+      #sketch {
+        width: 100%;
+        min-height: 12rem;
+        box-sizing: border-box;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.85em;
+        padding: 0.6rem;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        background: inherit;
+        color: inherit;
+      }
+      #compile-out {
+        max-height: 14rem;
+        overflow: auto;
+        margin: 0.5rem 0 0;
+        padding: 0.6rem;
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        font-size: 0.85em;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
     </style>
   </head>
   <body>
     <h1>arduino-cli, compiled to WebAssembly</h1>
     <p class="sub">
       The real CLI runs in this tab. Indexes and installed files live in IndexedDB.
-      Compiling and uploading still need native tools, so those two are out of reach here.
+      Sketches compile here too: the AVR toolchain is a wasm build of avr-gcc's own
+      cc1plus, as, ld and objcopy. Uploading still needs a USB stack the browser
+      gives only through WebSerial, so that part is separate.
     </p>
 
     <section>
@@ -145,7 +170,7 @@
     <section>
       <h2>Indexes</h2>
       <div class="row">
-        <input id="index-default" type="text" placeholder="package index URL (blank = Arduino's own)" />
+        <input id="index-default" type="text" placeholder="package index URL (blank = the AVR index this page ships)" />
       </div>
       <div class="row" style="margin-top: 0.5rem">
         <input id="index-extra" type="text" placeholder="extra package index URLs, space or comma separated" />
@@ -188,6 +213,37 @@
         <button id="library-installed" disabled>Installed</button>
       </div>
       <ul id="libraries"></ul>
+    </section>
+
+    <section>
+      <h2>Compile</h2>
+      <p class="hint">
+        The compiler runs in this page, so nothing is uploaded anywhere to build a
+        sketch. Install <code>arduino:avr</code> once, then compile. Only AVR is
+        wired up: the wasm toolchain that exists is avr-gcc's.
+      </p>
+      <div class="row">
+        <input id="compile-fqbn" type="text" value="arduino:avr:uno" />
+        <button id="core-install-avr" disabled>Install arduino:avr</button>
+        <button id="compile" disabled>Compile</button>
+      </div>
+      <div class="row" style="margin-top: 0.5rem">
+        <textarea id="sketch" spellcheck="false">void setup() {
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+void loop() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(500);
+  digitalWrite(LED_BUILTIN, LOW);
+  delay(500);
+}</textarea>
+      </div>
+      <div class="row" style="margin-top: 0.5rem">
+        <span id="compile-status" class="meta"></span>
+        <a id="hex-download" class="meta" download="Blink.ino.hex" hidden>Download .hex</a>
+      </div>
+      <pre id="compile-out"></pre>
     </section>
 
     <section>

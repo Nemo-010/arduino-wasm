@@ -10,112 +10,12 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { buildDocument, check, installBrowserGlobals, waitFor, web } from "./dom.mjs";
 import { fixtureFetch, FIXTURE_ORIGIN } from "./fixture-fetch.mjs";
 
 // app.js replaces globalThis.process with the wasm shim; keep the real one.
 const realProcess = process;
 const verbose = realProcess.env.VERBOSE === "1";
-
-const here = path.dirname(fileURLToPath(import.meta.url));
-const web = path.join(here, "..", "web");
-
-function check(condition, message) {
-  if (!condition) throw new Error("FAILED: " + message);
-  console.log("  ok  " + message);
-}
-
-// ---------------------------------------------------------------------------
-// Just enough DOM for app.js.
-
-class Element {
-  constructor(tag) {
-    this.tagName = tag.toUpperCase();
-    this.children = [];
-    this.ownText = "";
-    this.className = "";
-    this.id = "";
-    this.disabled = false;
-    this.value = "";
-    this.onclick = null;
-    this.scrollTop = 0;
-    this.scrollHeight = 0;
-  }
-  append(...nodes) {
-    this.children.push(...nodes);
-  }
-  replaceChildren(...nodes) {
-    this.children = nodes;
-  }
-  get textContent() {
-    return this.ownText + this.children.map((child) => child.textContent ?? "").join("");
-  }
-  set textContent(value) {
-    this.ownText = String(value);
-    this.children = [];
-  }
-}
-
-async function buildDocument() {
-  const html = await readFile(path.join(web, "index.html"), "utf8");
-  const byId = new Map();
-  const all = [];
-  for (const [, tag, attributes] of html.matchAll(/<([a-zA-Z0-9]+)\b([^>]*)>/g)) {
-    const id = /\sid="([^"]+)"/.exec(attributes)?.[1];
-    if (!id) continue;
-    const element = new Element(tag);
-    element.id = id;
-    byId.set(id, element);
-    all.push(element);
-  }
-
-  const document = {
-    getElementById: (id) => byId.get(id) ?? null,
-    createElement: (tag) => {
-      const element = new Element(tag);
-      all.push(element);
-      return element;
-    },
-    querySelectorAll: (selector) =>
-      selector === "button" ? all.filter((element) => element.tagName === "BUTTON") : [],
-  };
-  return { document, byId, all };
-}
-
-// ---------------------------------------------------------------------------
-// Just enough browser for app.js.
-
-function installBrowserGlobals({ document, config }) {
-  globalThis.document = document;
-  globalThis.location = { reload: () => console.log("  (page would reload)") };
-  // Node defines `navigator` and `localStorage` as getter-only globals.
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    writable: true,
-    value: {
-      store: new Map(Object.entries(config)),
-      getItem(key) {
-        return this.store.get(key) ?? null;
-      },
-      setItem(key, value) {
-        this.store.set(key, value);
-      },
-    },
-  });
-  Object.defineProperty(globalThis, "navigator", {
-    configurable: true,
-    writable: true,
-    value: {},
-  });
-}
-
-async function waitFor(predicate, label, timeoutMs = 120000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`timed out waiting for ${label}`);
-}
 
 // ---------------------------------------------------------------------------
 

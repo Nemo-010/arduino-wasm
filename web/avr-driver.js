@@ -51,6 +51,13 @@ const VALUE_FLAGS = new Set([
   // objcopy: "-O ihex", "-j .eeprom", "-R .eeprom" all take a separate value.
   // -A is deliberately absent: avr-size spells "all sections" as a bare -A.
   "-O", "-j", "-R",
+  // objcopy's other value-taking options. The eeprom recipe uses
+  // "--change-section-lma .eeprom=0"; treating that value as a file operand is
+  // how the .eep step silently produced nothing.
+  "--change-section-lma", "--change-section-vma", "--change-section-address",
+  "--adjust-section-vma", "--adjust-section-lma", "--set-start", "--gap-fill",
+  "--pad-to", "--redefine-sym", "--redefine-syms", "--add-section",
+  "--rename-section", "--set-section-flags", "--interleave", "-b", "-F",
 ]);
 
 // Flags ld understands. Anything else on the link line is a compiler or
@@ -617,9 +624,15 @@ export async function createAvrDriver(options) {
   }
 
   async function objcopy(tokens) {
+    // objcopy's positional contract is "infile [outfile]" as the last one or two
+    // non-option arguments, so a value flag the tokeniser does not know cannot
+    // silently become the input file the way it did with --change-section-lma.
     const all = operands(tokens);
-    const input = all[0];
+    if (all.length > 2) {
+      note("avr driver: objcopy was given " + all.length + " file operands, using the last two: " + all.join(" "));
+    }
     const output = all[all.length - 1];
+    const input = all.length > 1 ? all[all.length - 2] : output;
     const argv = [];
     for (const token of tokens) {
       if (token.operand !== undefined) argv.push(token.operand);

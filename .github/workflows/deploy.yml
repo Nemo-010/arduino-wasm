@@ -58,6 +58,12 @@ jobs:
       - name: Test the page
         run: node test/page.mjs
 
+      - name: Test the AVR toolchain through the CLI
+        run: node test/avr.mjs
+
+      - name: Test the page's AVR compile
+        run: node test/page-compile.mjs
+
       - name: Test the static server
         run: python3 test/serve_test.py
 
