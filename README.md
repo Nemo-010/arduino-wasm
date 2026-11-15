@@ -32,6 +32,9 @@ Proven by the tests in this repository, against a real index and real archives:
 - Storage in IndexedDB through `web/nodefs.js`, the same shim the tests use.
 - Compiling a sketch for AVR in the page, producing a `.hex`, with the real
   builder and the real platform recipes (`test/avr.mjs`, `test/page-compile.mjs`).
+- Assembling and linking for ARM in WebAssembly: `as`, `ld`, `objcopy` and `ar`
+  for `arm-none-eabi`, built from GNU binutils (`test/arm-tools.mjs`). This is
+  the toolchain's back half; the C++ front end for ARM is not built yet.
 
 ## What does not work
 
@@ -65,13 +68,70 @@ Everything before that wall worked, against the real servers:
 - the ARM compiler now on disk is a 1,153,656 byte x86-64 ELF, `e_machine 62`.
 
 That compiler is an x86-64 ELF, and there is no wasm build of
-`arm-none-eabi-gcc` to substitute for it, so this target needs an emulator (gex)
-or a cross-compiler built to wasm. Until one of those exists, nothing on this
-page can compile for the XIAO.
+`arm-none-eabi-gcc` to substitute for it, so this target needs a cross-compiler
+built to wasm. Half of that substitute now exists and is measured: the ARM
+assembler, linker, `objcopy` and `ar` are built from GNU binutils 2.42 and run
+in WebAssembly (see *The ARM tools*, below). The C++ front end is the half still
+missing, so the compile for a XIAO still stops before it starts.
 
 The script exits 0 (compiled), 2 (a download was refused), 3 (reached the
 toolchain and could not start it) or 1 (anything else), so the outcome is
 checkable without reading prose.
+
+### The ARM tools
+
+`arm-none-eabi-gcc` cannot run in a page, but its source is free, so the route
+taken for AVR works here too: build the pieces to wasm and supply the target's
+headers and libraries from the vendor package, which already ships them. The
+first half of that is done.
+
+`scripts/build-arm-tools.py` downloads `binutils-2.42.tar.xz`, verifies it
+against a pinned SHA-256 and builds `gas`, `ld`, `objcopy` and `ar` for
+`arm-none-eabi` with Emscripten 4.0.10, the same toolchain version the AVR
+build uses. It needs an activated emsdk (`EMSDK` in the environment, or
+`../.scratch/toolchain/emsdk`). Measured 2026-11-15 on this machine, 12 cores:
+
+```
+$ python3 scripts/build-arm-tools.py
+built in 1m57s
+  as.mjs       66925 bytes   ar.mjs       69100 bytes
+  as.wasm    1232833 bytes   ar.wasm     574153 bytes
+  ld.mjs       72705 bytes   objcopy.mjs  67915 bytes
+  ld.wasm    1215635 bytes   objcopy.wasm 758535 bytes
+```
+
+The `.mjs` sizes are identical to the AVR release's, which is what the same
+Emscripten version should produce for the same runtime.
+
+`test/arm-tools.mjs` runs them and checks the bytes rather than the exit codes:
+
+```
+$ node test/arm-tools.mjs
+ok   gas assembles a Thumb object [exit 0, 700 bytes]
+ok   the object is ELF32 for ARM (machine 40) [machine 40, type 1]
+ok   ld links an executable for ARM [machine 40, type 2, 4576 bytes]
+ok   the entry point is Thumb [entry 0x1]
+ok   the linked image holds the Thumb encodings of the source
+ok   the literal pool holds 0x20001000
+ok   objcopy writes Intel HEX that parses and ends at EOF
+ok   the hex payload is the same image
+ok   ar writes a GNU archive
+ok   ld links from the archive ar wrote, giving the same image
+ok   a bad -mcpu makes as exit non-zero
+11/11 checks passed
+```
+
+The linked image is disassembled by hand: `01 48 01 21 01 60 fe e7` is
+`ldr r0, [pc, #4]; movs r1, #1; str r1, [r0]; b .` and the literal that follows
+is `0x20001000`. The archive check links from `libblink.a` instead of the
+object, because an archive is only worth writing if `ld` can read it back.
+
+What is still missing is the front end: `cc1`/`cc1plus` for `arm-none-eabi`.
+The same script fills that gap when it is written, and the sysroot does not need
+building — Seeed's `arm-none-eabi-gcc` package ships `arm-none-eabi/include`,
+`lib` and `lib/gcc/.../{crtbegin.o,libgcc.a}`, the same shape as the AVR sysroot
+this page already carries. Until then nothing can compile C for the XIAO, and
+the page says so.
 
 **Board URLs and archives without CORS headers.** A server only sends
 `access-control-allow-origin` when the request carries an `Origin` header, so
@@ -227,11 +287,13 @@ scripts/build-ide.py        builds the arduino-ide frontend for the browser
 scripts/fetch-avr-tools.py  downloads the wasm AVR toolchain, verifies hashes
 scripts/make-avr-index.py   builds the package index the page installs from
 scripts/gen-avr-mcus.py     generates web/avr-mcus.js from GCC's avr-mcus.def
+scripts/build-arm-tools.py  builds gas, ld, objcopy, ar for arm-none-eabi as wasm
 web/index.html, app.js      the page
 web/page-avr.js             the page's half of the toolchain: index shim, loader
 web/avr-driver.js           answers avr-g++/ar/size/ctags with wasm tools
 web/avr-exec.js             installs globalThis.arduinoExec over the CLI's seam
 web/avr-assets.js           one asset loader, shared by the page and the tests
+web/arm-tools.js            runs a wasm ARM tool: stage inputs, call main, read outputs
 web/avr-mcus.js             generated device to architecture and macro table
 web/tools/avr/              the wasm AVR toolchain, with PROVENANCE.md
 web/indexes/avr/            the package index the page carries, with README.md
@@ -499,6 +561,12 @@ carries. The page's index shim runs with a disk `read` instead of a socket, so
 the mapping is exercised; the XHR transport itself is the one part a Node test
 cannot reach. Removing the page's toolchain install makes it fail with
 `pipe: not implemented on js` — planted and measured.
+
+`test/arm-tools.mjs` runs the wasm ARM binutils — assemble, link, `objcopy` to
+binary and Intel HEX, `ar` and a second link from the archive — and checks the
+linked bytes against the Thumb encodings the source must produce. It exits 2
+when `build/arm-wasm/out/` is absent, because those tools are built locally and
+not committed; there is no compiler for ARM yet, so no CI step builds them.
 
 `test/ide.mjs` boots the built IDE frontend in headless Chrome over a CDP pipe
 and asserts what the app itself reports: the shell has body text, the title

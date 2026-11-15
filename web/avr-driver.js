@@ -408,13 +408,20 @@ export async function createAvrDriver(options) {
 
     let code = 0;
     try {
-      instance.callMain(argv);
+      // Emscripten's handleException catches ExitStatus and returns its status,
+      // so a tool that fails reports through this return value and throws
+      // nothing. Measured: cc1plus on a missing input returns 1, throws null.
+      const status = instance.callMain(argv);
+      if (typeof status === "number") code = status;
     } catch (error) {
-      // Emscripten's exit path throws ExitStatus even with the runtime kept
-      // alive; anything else is a real failure inside the tool.
+      // A tool can still throw: an abort inside the runtime is not an exit.
       if (error && typeof error.status === "number") code = error.status;
       else throw error;
     }
+    // In Node, Emscripten's quit_ sets process.exitCode as well as returning
+    // the status, which would make a passing test exit non-zero because one
+    // tool inside it failed. The status is returned instead; clear the leak.
+    if (typeof process !== "undefined" && typeof process.exitCode === "number" && process.exitCode !== 0) process.exitCode = 0;
 
     const written = [];
     for (const path of outputs) {
