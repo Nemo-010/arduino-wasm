@@ -1,0 +1,18 @@
+{
+    "manifest": {
+        "application": {
+            "bin_file": "gap.bin",
+            "dat_file": "gap.dat",
+            "init_packet_data": {
+                "application_version": 4294967295,
+                "device_revision": 65535,
+                "device_type": 82,
+                "firmware_crc16": 39113,
+                "softdevice_req": [
+                    182
+                ]
+            }
+        },
+        "dfu_version": 0.5
+    }
+}
