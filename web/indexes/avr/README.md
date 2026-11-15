@@ -18,8 +18,8 @@ Uploading needs avrdude talking to a serial port, and the page has no avrdude.
 The archive URLs are absolute and point at `https://arduino-wasm.invalid/indexes/avr/`.
 That host does not exist. `arduino-cli` uses the URL from the index verbatim, so
 the page installs a `fetch` shim that maps that origin onto its own directory
-(`web/page-avr.js`, `createIndexFetch`). Regenerating the index with a different
-`--base-url` means changing `AVR_ORIGIN` to match.
+(`web/page-index.js`, `createIndexFetch`). Regenerating the index with a
+different `--base-url` means changing `PAGE_ORIGIN` or `AVR_BASE` to match.
 
 To rebuild both this index and its archive:
 

@@ -1,0 +1,97 @@
+{
+  "packages": [
+    {
+      "name": "Seeeduino",
+      "maintainer": "Seeed Studio",
+      "websiteURL": "https://www.seeedstudio.com/",
+      "email": "techsupport@seeed.cc",
+      "platforms": [
+        {
+          "name": "Seeed nRF52 Boards",
+          "architecture": "nrf52",
+          "version": "1.1.9",
+          "category": "Contributed",
+          "url": "https://arduino-wasm.invalid/indexes/nrf52/Seeed_nRF52_Boards-1.1.9.tar.bz2",
+          "archiveFileName": "Seeed_nRF52_Boards-1.1.9.tar.bz2",
+          "checksum": "SHA-256:2c22069bb83f4600d4076c31312b124f946bd4ab4d19ae3c46f3142f8a05e6f3",
+          "size": "23218120",
+          "boards": [
+            {
+              "name": "Seeed XIAO nRF52840 Sense"
+            },
+            {
+              "name": "Seeed XIAO nRF52840"
+            },
+            {
+              "name": "Seeed Wio Tracker 1110"
+            },
+            {
+              "name": "Seeed XIAO nRF52840 Sense Plus"
+            },
+            {
+              "name": "Seeed XIAO nRF52840 Plus"
+            }
+          ],
+          "toolsDependencies": [
+            {
+              "packager": "Seeeduino",
+              "name": "arm-none-eabi-gcc",
+              "version": "9-2019q4"
+            },
+            {
+              "packager": "Seeeduino",
+              "name": "nrfjprog",
+              "version": "9.4.0"
+            },
+            {
+              "packager": "Seeeduino",
+              "name": "CMSIS",
+              "version": "5.7.0"
+            }
+          ]
+        }
+      ],
+      "tools": [
+        {
+          "name": "arm-none-eabi-gcc",
+          "version": "9-2019q4",
+          "systems": [
+            {
+              "host": "x86_64-pc-linux-gnu",
+              "url": "https://arduino-wasm.invalid/indexes/nrf52/tools/arm-none-eabi-gcc-9-2019q4.tar.gz",
+              "archiveFileName": "arm-none-eabi-gcc-9-2019q4.tar.gz",
+              "checksum": "SHA-256:e2cffcbf313ffd6568e5d26d9c638b1fa6035401351f2b64b1f10d059f84c098",
+              "size": "299"
+            }
+          ]
+        },
+        {
+          "name": "nrfjprog",
+          "version": "9.4.0",
+          "systems": [
+            {
+              "host": "x86_64-pc-linux-gnu",
+              "url": "https://arduino-wasm.invalid/indexes/nrf52/tools/nrfjprog-9.4.0.tar.gz",
+              "archiveFileName": "nrfjprog-9.4.0.tar.gz",
+              "checksum": "SHA-256:2b0a7aad81fa74d8636636b6b7a28973f3d4586aa24684d45fc3763c30509165",
+              "size": "182"
+            }
+          ]
+        },
+        {
+          "name": "CMSIS",
+          "version": "5.7.0",
+          "systems": [
+            {
+              "host": "x86_64-pc-linux-gnu",
+              "url": "https://arduino-wasm.invalid/indexes/nrf52/tools/CMSIS-5.7.0.tar.gz",
+              "archiveFileName": "CMSIS-5.7.0.tar.gz",
+              "checksum": "SHA-256:1971a6ec3ec2ff8ca7c1323c50c7a3618109cec5c8e28c3b177da6cfb36d023f",
+              "size": "2449581"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

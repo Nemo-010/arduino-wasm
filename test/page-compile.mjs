@@ -123,7 +123,8 @@ async function main() {
   );
   await byId.get("core-install-avr").onclick();
   await waitFor(() => !byId.get("core-install-avr").disabled, "the install to finish", 180000);
-  check(log().includes("Installed arduino:avr"), "the core installed");
+  const installed = log().includes("Installed arduino:avr");
+  check(installed, "the core installed" + (installed ? "" : ": " + log().slice(-600)));
 
   console.log("\nCompile");
   byId.get("compile-fqbn").value = "arduino:avr:uno";

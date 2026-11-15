@@ -5,7 +5,8 @@
 // CLI. Everything else is the CLI's own work.
 
 import { createNodeFS, IdbBackend, MemoryBackend, deleteDatabase } from "./nodefs.js";
-import { AVR_INDEX_URL, installIndexShim, installPageAvr } from "./page-avr.js";
+import { AVR_INDEX_URL, NRF52_INDEX_URL, installIndexShim } from "./page-index.js";
+import { installPageTools } from "./page-tools.js";
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -127,7 +128,10 @@ async function boot() {
   const defaultIndex = config.defaultIndex || AVR_INDEX_URL;
   installIndexShim();
   $("index-default").value = defaultIndex;
-  $("index-extra").value = config.extraIndexes;
+  // The nRF52 index ships with the page for the same reason the AVR one does,
+  // and it is registered by default so that a board from it is one click away
+  // rather than a URL the user has to know.
+  $("index-extra").value = config.extraIndexes || NRF52_INDEX_URL;
   $("index-library").value = config.libraryIndex;
 
   const version = await loadJSON("version.json");
@@ -151,7 +155,7 @@ async function boot() {
   // Before the CLI runs: a compile asks arduinoExec for every tool it wants, and
   // answering "not implemented on js" is only correct when the toolchain is
   // genuinely absent.
-  installPageAvr({ nodefs: shim, log });
+  installPageTools({ nodefs: shim, log });
 
   // wasm_exec.js is a classic script, already loaded by the page. It installs
   // globalThis.Go and leaves our fs/path/process alone because they exist.
@@ -179,7 +183,10 @@ async function boot() {
   cli = globalThis.arduinoCLI;
 
   log("CLI loaded");
-  await startInstance(config);
+  // The field was just prefilled for the user, so it is also what gets
+  // registered: showing a URL that the settings do not contain would be a lie,
+  // and the nRF52 index would need a second click on "Save and reload".
+  await startInstance({ ...config, extraIndexes: $("index-extra").value });
 }
 
 async function startInstance(config) {
@@ -513,24 +520,25 @@ async function writeSketch(text) {
 
 // The install button asks the index which release is newest by passing an empty
 // version, which parseVersion turns into nil so the package manager picks it.
-async function installAvrCore() {
+async function installCoreNamed(packager, architecture, button) {
+  const label = `${packager}:${architecture}`;
   busy(true);
-  $("core-install-avr").disabled = true;
-  log("Installing arduino:avr");
+  button.disabled = true;
+  log(`Installing ${label}`);
   try {
     await call("PlatformInstall", {
       instance,
-      platformPackage: "arduino",
-      architecture: "avr",
+      platformPackage: packager,
+      architecture,
       version: "",
       skipPostInstall: true,
     });
-    log("Installed arduino:avr", "ok");
+    log(`Installed ${label}`, "ok");
     await init();
   } catch (error) {
     log(`  ${error.message}`, "err");
   }
-  $("core-install-avr").disabled = false;
+  button.disabled = false;
   busy(false);
 }
 
@@ -556,17 +564,29 @@ async function newestBuildDirectory() {
   return null;
 }
 
-async function readTextFile(target) {
+async function readFileBytes(target) {
   const fs = globalThis.fs;
   const fd = await fsCall(fs, "open", target, "r", 0o644);
   try {
     const stat = await fsCall(fs, "fstat", fd);
     const buffer = new Uint8Array(stat.size);
-    await fsCall(fs, "read", fd, buffer, 0, buffer.length, 0);
-    return new TextDecoder().decode(buffer);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const count = await fsCall(fs, "read", fd, buffer, offset, buffer.length - offset, offset);
+      if (!count) break;
+      offset += count;
+    }
+    if (offset !== buffer.length) {
+      throw new Error(`${target}: read ${offset} of ${buffer.length} bytes`);
+    }
+    return buffer;
   } finally {
     await fsCall(fs, "close", fd);
   }
+}
+
+async function readTextFile(target) {
+  return new TextDecoder().decode(await readFileBytes(target));
 }
 
 async function compileSketch() {
@@ -576,6 +596,7 @@ async function compileSketch() {
   out.textContent = "";
   status.textContent = "compiling…";
   $("hex-download").hidden = true;
+  $("zip-download").hidden = true;
   busy(true);
 
   const started = Date.now();
@@ -622,6 +643,18 @@ async function compileSketch() {
     log(`no .hex to download: ${error.message}`, "err");
   }
 
+  // Only a board whose platform has a DFU recipe produces a .zip, and for those
+  // boards it is the artefact worth keeping: the .hex alone cannot be flashed.
+  try {
+    const zip = await readFileBytes(buildPath + "/Sketch.ino.zip");
+    const link = $("zip-download");
+    link.href = URL.createObjectURL(new Blob([zip], { type: "application/zip" }));
+    link.download = "Sketch.ino.zip";
+    link.hidden = false;
+  } catch (error) {
+    // nothing to offer
+  }
+
   status.textContent = (size ? `${size[1]} bytes of flash, ` : "") + `${seconds} s`;
   log(`compiled ${fqbn} in ${seconds} s` + (size ? `, ${size[1]} bytes` : ""), "ok");
   busy(false);
@@ -655,7 +688,12 @@ $("library-search").onclick = () => searchLibraries().catch((error) => log(error
 $("library-installed").onclick = () =>
   listInstalledLibraries().catch((error) => log(error.message, "err"));
 $("serial").onclick = () => identifyBoard().catch((error) => log(error.message, "err"));
-$("core-install-avr").onclick = () => installAvrCore();
+$("core-install-avr").onclick = () => installCoreNamed("arduino", "avr", $("core-install-avr"));
+$("core-install-nrf52").onclick = () =>
+  installCoreNamed("Seeeduino", "nrf52", $("core-install-nrf52"));
+$("compile-board").onchange = () => {
+  if ($("compile-board").value) $("compile-fqbn").value = $("compile-board").value;
+};
 $("compile").onclick = () => compileSketch().catch((error) => {
   $("compile-status").textContent = error.message;
   log(error.message, "err");

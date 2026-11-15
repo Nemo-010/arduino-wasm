@@ -219,12 +219,20 @@
       <h2>Compile</h2>
       <p class="hint">
         The compiler runs in this page, so nothing is uploaded anywhere to build a
-        sketch. Install <code>arduino:avr</code> once, then compile. Only AVR is
-        wired up: the wasm toolchain that exists is avr-gcc's.
+        sketch. Two platforms have a wasm toolchain here: <code>arduino:avr</code>,
+        and <code>Seeeduino:nrf52</code> (the Seeed XIAO nRF52840) whose
+        arm-none-eabi GCC was built to wasm as well. Install a core once, then
+        compile. <strong>Neither board can be flashed from here yet</strong>:
+        uploads need WebSerial, which is not wired up.
       </p>
       <div class="row">
+        <select id="compile-board">
+          <option value="arduino:avr:uno">Arduino Uno (avr)</option>
+          <option value="Seeeduino:nrf52:xiaonRF52840">Seeed XIAO nRF52840 (nrf52)</option>
+        </select>
         <input id="compile-fqbn" type="text" value="arduino:avr:uno" />
         <button id="core-install-avr" disabled>Install arduino:avr</button>
+        <button id="core-install-nrf52" disabled>Install Seeeduino:nrf52</button>
         <button id="compile" disabled>Compile</button>
       </div>
       <div class="row" style="margin-top: 0.5rem">
@@ -241,7 +249,8 @@ void loop() {
       </div>
       <div class="row" style="margin-top: 0.5rem">
         <span id="compile-status" class="meta"></span>
-        <a id="hex-download" class="meta" download="Blink.ino.hex" hidden>Download .hex</a>
+        <a id="hex-download" class="meta" download="Sketch.ino.hex" hidden>Download .hex</a>
+        <a id="zip-download" class="meta" download="Sketch.ino.zip" hidden>Download DFU .zip</a>
       </div>
       <pre id="compile-out"></pre>
     </section>

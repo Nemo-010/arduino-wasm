@@ -13,6 +13,16 @@
 // pulls the core plus its tool dependencies (hundreds of megabytes).
 
 import { startCLI } from "./harness.mjs";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { installArmExec } from "../web/arm-exec.js";
+import { createArmAssets } from "../web/arm-assets.js";
+
+import { unzip } from "./zip.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const ARM_TOOLS = path.join(here, "../web/tools/arm");
 
 const realProcess = process;
 
@@ -165,6 +175,43 @@ if (installError) {
 }
 
 console.log(`\nCompile blink for ${FQBN}`);
+
+// Answer the toolchain's command lines from the wasm tools built by
+// scripts/build-arm-tools.py. Without this the CLI reaches its "pipe: not
+// implemented on js" wall, which is what this test used to prove.
+const armNotes = [];
+const armAssets = createArmAssets({
+  load: (name) => readFile(path.join(ARM_TOOLS, name)),
+  importModule: (name) => import(pathToFileURL(path.join(ARM_TOOLS, name + ".mjs")).href),
+});
+installArmExec({
+  nodefs: cli.shim,
+  readAsset: armAssets.readAsset,
+  importModule: armAssets.importModule,
+  log: (line) => {
+    armNotes.push(line);
+    if (/ignores|no implementation|cannot|missing/i.test(line)) realProcess.stderr.write("  " + line + "\n");
+  },
+});
+
+// ARM_TRACE=1 prints every command line the CLI asks for and the code the
+// driver answered with. A compile that stops mid-recipe is invisible otherwise.
+if (realProcess.env.ARM_TRACE === "1") {
+  const inner = globalThis.arduinoExec;
+  let index = 0;
+  globalThis.arduinoExec = (request, callback) => {
+    index += 1;
+    const args = request.args ?? [];
+    const tool = String(args[0] ?? "").split("/").pop();
+    const shown = args.slice(1).filter((arg) => /^-o$|^-c$|^-E$|^-MMD$|^--specs=|^-mcpu=|^-[TWLl]$/.test(arg) || /\.[ch]$|\.cpp$|\.o$|\.elf$|\.hex$|\.a$/.test(arg));
+    realProcess.stderr.write(`  exec ${index}: ${tool} ${shown.join(" ")}\n`);
+    inner(request, (result) => {
+      realProcess.stderr.write(`  exec ${index}: exit ${result.code}${result.stderr ? " stderr=" + String(result.stderr).slice(0, result.code === 0 ? 160 : 2000) : ""}${result.error ? " error=" + String(result.error).slice(0, 300) : ""}${result.code !== 0 ? "\n    argv: " + args.join(" ") : ""}\n`);
+      callback(result);
+    });
+  };
+}
+
 try {
   const result = await cli.call("Compile", {
     instance,
@@ -178,10 +225,147 @@ try {
     .join("");
   console.log("  compile succeeded");
   if (output) console.log(output.split("\n").slice(-10).join("\n"));
-  realProcess.exit(0);
+
+  // The artefact, not the exit code: a compile that reported success and wrote
+  // no image would pass on the message alone.
+  const keysAtEnd = await cli.shim.backend.keys();
+  const elfKey = keysAtEnd.find((key) => /\/Blink\.ino\.elf$/i.test(key));
+  const hexKey = keysAtEnd.find((key) => /\/Blink\.ino\.hex$/i.test(key));
+  check(Boolean(elfKey), "the link wrote an ELF");
+  check(Boolean(hexKey), "objcopy wrote an Intel HEX");
+  if (elfKey) {
+    const { data } = await cli.shim.backend.get(elfKey);
+    const magic = data[0] === 0x7f && data[1] === 0x45 && data[2] === 0x4c && data[3] === 0x46;
+    const machine = data[18] | (data[19] << 8);
+    console.log(`  ${elfKey} ${data.length} bytes`);
+    check(magic, "the image is an ELF");
+    check(machine === 40, `the image is ARM (e_machine ${machine})`);
+  }
+  // NRF52_DUMP=<dir> writes the build's own artefacts out, so a run can be
+  // inspected without instrumenting the shim.
+  if (realProcess.env.NRF52_DUMP) {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(realProcess.env.NRF52_DUMP, { recursive: true });
+    for (const key of keysAtEnd) {
+      // Only this sketch's build directory: the installed platform ships dozens
+      // of archives, and dumping them says nothing about the compile.
+      if (!key.startsWith("/home/arduino/.cache/arduino/sketches/")) continue;
+      if (!/\.(elf|hex|zip|map|bin|dat)$/.test(key)) continue;
+      const { data } = await cli.shim.backend.get(key);
+      await writeFile(key.replace(/^.*\//, "").replace(/^/, realProcess.env.NRF52_DUMP + "/"), data);
+      console.log(`  dumped ${key}`);
+    }
+  }
+  if (hexKey) {
+    const { data } = await cli.shim.backend.get(hexKey);
+    const text = new TextDecoder().decode(data);
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    console.log(`  ${hexKey} ${data.length} bytes, ${lines.length} records`);
+    check(lines.length > 1, "the HEX has records");
+    check(lines[lines.length - 1].trim() === ":00000001FF", "the HEX ends with an EOF record");
+    // The vector table is not the first record: objcopy writes the initialised
+    // .data at its RAM address first, with an extended-address record. So the
+    // table is located from the ELF's entry point, which is the reset handler
+    // it names, and the four bytes before that are the initial stack pointer.
+    // An XIAO nRF52840 has 256 KiB of RAM, so a stack pointer in the top page
+    // is the only one that bootloader and sketch agree on.
+    const words = [];
+    let base = 0;
+    for (const line of lines) {
+      const record = line.replace(/^:/, "");
+      const count = parseInt(record.slice(0, 2), 16);
+      const type = parseInt(record.slice(6, 8), 16);
+      const payload = record.slice(8, 8 + count * 2);
+      if (type === 0) {
+        for (let index = 0; index < count; index += 1) {
+          words.push({ address: base + parseInt(record.slice(2, 6), 16) + index,
+            value: parseInt(payload.slice(index * 2, index * 2 + 2), 16) });
+        }
+      } else if (type === 2 || type === 4) {
+        base = parseInt(payload, 16) * (type === 2 ? 16 : 65536);
+      }
+    }
+    const elf = elfKey ? (await cli.shim.backend.get(elfKey)).data : null;
+    const entry = elf ? (elf[24] | (elf[25] << 8) | (elf[26] << 16) | (elf[27] << 24)) : 0;
+    check((entry & 1) === 1, `the ELF entry point is a Thumb address (0x${entry.toString(16)})`);
+    const at = words.findIndex((word, index) => word.value === (entry & 0xff)
+      && words[index + 1] && words[index + 1].value === ((entry >>> 8) & 0xff)
+      && words[index + 2] && words[index + 2].value === ((entry >>> 16) & 0xff)
+      && words[index + 3] && words[index + 3].value === ((entry >>> 24) & 0xff));
+    let sp = 0;
+    if (at >= 4) {
+      sp = words[at - 4].value | (words[at - 3].value << 8) | (words[at - 2].value << 16) | (words[at - 1].value << 24);
+    }
+    check(at >= 4, `the reset handler appears in the image (at word ${at})`);
+    check(sp >= 0x20000000 && sp <= 0x20040000 && sp % 8 === 0,
+      `the word before the reset handler is a RAM stack pointer (0x${sp.toString(16)})`);
+  }
+
+  // The DFU package, and the same package from the real tool when it is
+  // installed. Both are the same input .hex, so the entries must be identical:
+  // the port's own output agreeing with itself would prove nothing.
+  const zipKey = keysAtEnd.find((key) => /\/Blink\.ino\.zip$/i.test(key));
+  check(Boolean(zipKey), "the recipe wrote a DFU package");
+  if (zipKey && hexKey) {
+    const zip = (await cli.shim.backend.get(zipKey)).data;
+    const entries = unzip(zip);
+    console.log(`  ${zipKey} ${zip.length} bytes, entries ${[...entries.keys()].join(", ")}`);
+    const manifest = entries.get("manifest.json");
+    check(Boolean(manifest), "the package holds a manifest");
+    if (manifest) {
+      const parsed = JSON.parse(new TextDecoder().decode(manifest.data));
+      // From the platform's boards.txt: xiaonRF52840.menu.softdevice.s140v6
+      // .build.sd_fwid=0x0123, which is the softdevice this board's package
+      // has to be addressed to.
+      // manifest.json nests these under manifest.application.init_packet_data.
+      const packet = parsed.manifest.application.init_packet_data;
+      check(JSON.stringify(packet.softdevice_req) === "[291]",
+        `the manifest requires softdevice 0x0123 (${JSON.stringify(packet.softdevice_req)})`);
+      check(parsed.manifest.application.dat_file === "Blink.ino.dat"
+        && parsed.manifest.application.bin_file === "Blink.ino.bin",
+        "the manifest names this sketch's files");
+    }
+
+    const oracle = realProcess.env.NRFUTIL_BIN;
+    if (oracle) {
+      const { mkdtemp, writeFile, readFile: read } = await import("node:fs/promises");
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const dir = await mkdtemp("/tmp/nrf52-oracle-");
+      const hexText = new TextDecoder().decode((await cli.shim.backend.get(hexKey)).data)
+        .replace(/\r\n/g, "\n");
+      const hexPath = path.join(dir, "Blink.ino.hex");
+      const outPath = path.join(dir, "Blink.ino.zip");
+      await writeFile(hexPath, hexText);
+      await promisify(execFile)(oracle, ["dfu", "genpkg", "--dev-type", "0x0052",
+        "--sd-req", "0x0123", "--application", hexPath, outPath]);
+      const theirs = unzip(await read(outPath));
+      check([...theirs.keys()].sort().join(",") === [...entries.keys()].sort().join(","),
+        `the package holds the same entry names as adafruit-nrfutil (${[...theirs.keys()].join(", ")})`);
+      for (const [name, entry] of theirs) {
+        const mine = entries.get(name);
+        const same = mine !== undefined && mine.data.length === entry.data.length
+          && Buffer.compare(Buffer.from(mine.data), Buffer.from(entry.data)) === 0;
+        check(same, `${name} is byte-identical to adafruit-nrfutil's (${entry.data.length} bytes)`);
+      }
+    } else {
+      console.log("  skipped: set NRFUTIL_BIN to compare the package with adafruit-nrfutil");
+    }
+  }
+  realProcess.exit(failures ? 1 : 0);
 } catch (error) {
   console.log("  compile failed: " + error.message);
-  const spawned = /not implemented on js|fork\/exec|exec:/.test(error.message);
-  check(spawned, "the failure is the toolchain spawn, not something earlier");
-  realProcess.exit(spawned ? 3 : 1);
+  // Before the ARM driver existed this failure was always the spawn wall. Now a
+  // failure is a failure, unless the seam itself reported no implementation.
+  const unimplemented = /not implemented on js|fork\/exec|exec:/.test(error.message);
+  if (unimplemented) {
+    check(false, "the toolchain spawn is still unimplemented");
+    realProcess.exit(3);
+  }
+  const lastNotes = armNotes.slice(-8);
+  if (lastNotes.length) {
+    realProcess.stderr.write("\n  driver notes:\n");
+    for (const line of lastNotes) realProcess.stderr.write("    " + line + "\n");
+  }
+  realProcess.exit(1);
 }

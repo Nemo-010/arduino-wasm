@@ -32,6 +32,19 @@
 
 import { AVR_DEVICES } from "./avr-mcus.js";
 import { readTarGz } from "./tar.js";
+import {
+  basename,
+  elfSections,
+  flagValue,
+  flagValues,
+  hasFlag,
+  joinedValue,
+  mkdirp,
+  operands,
+  parseArgs,
+  readFileIfAny,
+  writeFile,
+} from "./tool-common.js";
 
 const SYSROOT = "/wasm-avr/sysroot";
 const GCC_VERSION = "7.3.0";
@@ -66,53 +79,6 @@ const LINK_FLAGS = new Set([
   "-nostdlib", "-nostartfiles", "-nodefaultlibs", "-static", "-shared", "-r",
   "-s", "-N", "--gc-sections", "--relax", "--no-relax", "--noinhibit-exec",
 ]);
-
-function basename(path) {
-  const parts = String(path).split("/");
-  return parts[parts.length - 1];
-}
-
-function parseArgs(argv) {
-  const tokens = [];
-  for (let index = 1; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (VALUE_FLAGS.has(arg) && index + 1 < argv.length) {
-      tokens.push({ flag: arg, value: argv[index + 1] });
-      index += 1;
-    } else if (arg.startsWith("-")) {
-      tokens.push({ flag: arg });
-    } else {
-      tokens.push({ operand: arg });
-    }
-  }
-  return tokens;
-}
-
-function operands(tokens) {
-  return tokens.filter((token) => token.operand !== undefined).map((token) => token.operand);
-}
-
-function flagValue(tokens, name) {
-  for (const token of tokens) {
-    if (token.flag === name) return token.value;
-  }
-  return null;
-}
-
-function flagValues(tokens, name) {
-  return tokens.filter((token) => token.flag === name).map((token) => token.value);
-}
-
-function joinedValue(tokens, prefix) {
-  for (const token of tokens) {
-    if (token.flag && token.flag.startsWith(prefix)) return token.flag.slice(prefix.length);
-  }
-  return null;
-}
-
-function hasFlag(tokens, name) {
-  return tokens.some((token) => token.flag === name);
-}
 
 // The device as platform.txt spells it: -mmcu=atmega328p. `-mmcu avr5` is
 // accepted too, because a user may have put an architecture there by hand.
@@ -257,70 +223,6 @@ function restoreCLinkage(text) {
   });
 
   return { text: result, notes };
-}
-
-function mkdirp(FS, path) {
-  if (!path || path === "/" || path === "") return;
-  const parts = path.split("/").filter(Boolean);
-  let current = "";
-  for (const part of parts) {
-    current += "/" + part;
-    try {
-      FS.mkdir(current);
-    } catch (error) {
-      // EEXIST is the normal case: the directory is already there.
-      if (error && error.errno !== 20) throw error;
-    }
-  }
-}
-
-function writeFile(FS, path, data) {
-  const parent = path.slice(0, path.lastIndexOf("/"));
-  if (parent) mkdirp(FS, parent);
-  FS.writeFile(path, data);
-}
-
-function readFileIfAny(FS, path) {
-  try {
-    if (!FS.analyzePath(path).exists) return null;
-    return FS.readFile(path, { encoding: "binary" });
-  } catch (error) {
-    return null;
-  }
-}
-
-// ELF32 little-endian section table, for the avr-size stand-in. The size recipe
-// only needs each section's name and size, and the CLI sums .text/.data/.bss.
-function elfSections(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.length < 52 || view.getUint32(0, true) !== 0x464c457f) return null;
-  const sectionOffset = view.getUint32(0x20, true);
-  const sectionSize = view.getUint16(0x2e, true);
-  const sectionCount = view.getUint16(0x30, true);
-  const stringIndex = view.getUint16(0x32, true);
-  if (!sectionOffset || !sectionCount || sectionSize < 40) return null;
-
-  const header = (index) => sectionOffset + index * sectionSize;
-  const stringsHeader = header(stringIndex);
-  const stringsOffset = view.getUint32(stringsHeader + 0x10, true);
-  const stringsSize = view.getUint32(stringsHeader + 0x14, true);
-  const strings = bytes.subarray(stringsOffset, stringsOffset + stringsSize);
-
-  const sections = [];
-  for (let index = 0; index < sectionCount; index += 1) {
-    const at = header(index);
-    const nameOffset = view.getUint32(at, true);
-    const type = view.getUint32(at + 4, true);
-    const address = view.getUint32(at + 0x0c, true);
-    const size = view.getUint32(at + 0x14, true);
-    if (type === 8) continue; // SHT_NOBITS is still sized; only skip the null entry
-    let end = nameOffset;
-    while (end < strings.length && strings[end] !== 0) end += 1;
-    const name = new TextDecoder().decode(strings.subarray(nameOffset, end));
-    if (!name) continue;
-    sections.push({ name, address, size });
-  }
-  return sections;
 }
 
 export async function createAvrDriver(options) {
@@ -691,7 +593,7 @@ export async function createAvrDriver(options) {
   async function run(request) {
     const argv = request.args || [];
     const tool = basename(argv[0]);
-    const tokens = parseArgs(argv);
+    const tokens = parseArgs(argv, VALUE_FLAGS);
 
     switch (tool) {
       case "avr-g++":
@@ -747,7 +649,10 @@ export async function createAvrDriver(options) {
       }
     },
     // Exposed for the tests: the driver's own view of a command line.
-    describe: (argv) => ({ tokens: parseArgs(argv), arch: architectureFor(readMcu(parseArgs(argv))) }),
+    describe: (argv) => ({
+      tokens: parseArgs(argv, VALUE_FLAGS),
+      arch: architectureFor(readMcu(parseArgs(argv, VALUE_FLAGS))),
+    }),
     archives,
   };
 }

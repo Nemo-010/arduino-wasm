@@ -32,106 +32,60 @@ Proven by the tests in this repository, against a real index and real archives:
 - Storage in IndexedDB through `web/nodefs.js`, the same shim the tests use.
 - Compiling a sketch for AVR in the page, producing a `.hex`, with the real
   builder and the real platform recipes (`test/avr.mjs`, `test/page-compile.mjs`).
-- Assembling and linking for ARM in WebAssembly: `as`, `ld`, `objcopy` and `ar`
-  for `arm-none-eabi`, built from GNU binutils (`test/arm-tools.mjs`). This is
-  the toolchain's back half; the C++ front end for ARM is not built yet.
+- Compiling, assembling and linking for ARM in WebAssembly: `cc1`, `cc1plus`,
+  `as`, `ld`, `objcopy` and `ar` for `arm-none-eabi`, built from GCC 9.2.0 and
+  GNU binutils 2.42 (`test/arm-tools.mjs`). A whole blink sketch for the XIAO
+  nRF52840 is compiled, linked and packaged into a DFU zip through the wasm CLI
+  (`test/nrf52.mjs`), and the same pipeline runs in the page
+  (`test/page-nrf52.mjs`).
 
 ## What does not work
 
-**Upload.** A compile for AVR now finishes in the page (see *Compiling on the
-page*). An upload does not. The last step of an upload recipe is `avrdude`, a
-child process, and `web/avr-driver.js` answers it with a refusal that says so.
-WebSerial can open the port and identify the board; nothing here speaks STK500
-to a board yet.
+**Upload.** A compile for AVR and for the XIAO nRF52840 now finishes in the
+page (see *Compiling on the page*). An upload does not. The last step of an AVR
+upload recipe is `avrdude`, a child process, and `web/avr-driver.js` answers it
+with a refusal that says so; the nRF52 recipe asks for
+`adafruit-nrfutil dfu serial`, which needs a serial port, and nothing here
+speaks STK500 or DFU to a board yet. WebSerial can open the port and identify
+the board.
 
 **Compiling for an architecture with no wasm compiler.** The exec seam is the
 only place a toolchain is reached, so a platform compiles on the page when a
 wasm build of its compiler exists, and the same driver shape works for any of
-them. Only AVR has one today. The nRF52 path still stops at the compiler, and
-that is the whole of the remaining gap:
+them. Two exist now — AVR, taken from an existing wasm build, and ARM, built
+here. A platform whose compiler ships only as a binary blob without source
+still cannot compile.
 
 The board run is reproduced by `NETWORK=1 node test/nrf52.mjs`. It adds Seeed's
 board URL, installs `Seeeduino:nrf52@1.1.9`, writes blink and compiles it for
-the XIAO nRF52840. Measured 2026-11-13 it took 74 s and stopped at the same
-wall:
+the XIAO nRF52840. Measured 2026-11-15 on this machine, the run takes about
+90 s and ends with a linked image and a DFU package:
 
 ```
-compile failed: Compile: pipe: not implemented on js
+ok   the image is ARM (e_machine 40)
+ok   the entry point is a Thumb address (0x28639)
+ok   the word before the reset handler is a RAM stack pointer (0x20040000)
+ok   manifest.json is byte-identical to adafruit-nrfutil's (466 bytes)
 ```
 
-Everything before that wall worked, against the real servers:
+Against the real servers:
 
 - the 290,172 byte index fetched over TLS and parsed into 14 releases of
   `Seeeduino:nrf52`, five of them boards, including "Seeed XIAO nRF52840";
 - the platform and all three tool dependencies installed into the wasm
-  filesystem: 2,451 core files and 13,905 tool files;
-- the ARM compiler now on disk is a 1,153,656 byte x86-64 ELF, `e_machine 62`.
-
-That compiler is an x86-64 ELF, and there is no wasm build of
-`arm-none-eabi-gcc` to substitute for it, so this target needs a cross-compiler
-built to wasm. Half of that substitute now exists and is measured: the ARM
-assembler, linker, `objcopy` and `ar` are built from GNU binutils 2.42 and run
-in WebAssembly (see *The ARM tools*, below). The C++ front end is the half still
-missing, so the compile for a XIAO still stops before it starts.
+  filesystem: 2,451 core files and 13,905 tool files. The x86-64
+  `arm-none-eabi-g++` it installs (1,153,656 bytes, `e_machine 62`) is never
+  executed: the exec seam answers with wasm tools instead;
+- `cc1plus` compiled the sketch, `as` assembled it, `ld` linked it, `objcopy`
+  wrote a 75,513 byte Intel HEX with 1,681 records and the recipe's own
+  `adafruit-nrfutil genpkg` step produced a 27,632 byte DFU package;
+- the CLI's size line reads `Sketch uses 26816 bytes (3%) of program storage
+  space. Maximum is 811008 bytes.` and `Global variables use 5176 bytes (2%)
+  of dynamic memory` — 2,492 bytes of `.data` plus 2,684 bytes of `.bss`.
 
 The script exits 0 (compiled), 2 (a download was refused), 3 (reached the
 toolchain and could not start it) or 1 (anything else), so the outcome is
 checkable without reading prose.
-
-### The ARM tools
-
-`arm-none-eabi-gcc` cannot run in a page, but its source is free, so the route
-taken for AVR works here too: build the pieces to wasm and supply the target's
-headers and libraries from the vendor package, which already ships them. The
-first half of that is done.
-
-`scripts/build-arm-tools.py` downloads `binutils-2.42.tar.xz`, verifies it
-against a pinned SHA-256 and builds `gas`, `ld`, `objcopy` and `ar` for
-`arm-none-eabi` with Emscripten 4.0.10, the same toolchain version the AVR
-build uses. It needs an activated emsdk (`EMSDK` in the environment, or
-`../.scratch/toolchain/emsdk`). Measured 2026-11-15 on this machine, 12 cores:
-
-```
-$ python3 scripts/build-arm-tools.py
-built in 1m57s
-  as.mjs       66925 bytes   ar.mjs       69100 bytes
-  as.wasm    1232833 bytes   ar.wasm     574153 bytes
-  ld.mjs       72705 bytes   objcopy.mjs  67915 bytes
-  ld.wasm    1215635 bytes   objcopy.wasm 758535 bytes
-```
-
-The `.mjs` sizes are identical to the AVR release's, which is what the same
-Emscripten version should produce for the same runtime.
-
-`test/arm-tools.mjs` runs them and checks the bytes rather than the exit codes:
-
-```
-$ node test/arm-tools.mjs
-ok   gas assembles a Thumb object [exit 0, 700 bytes]
-ok   the object is ELF32 for ARM (machine 40) [machine 40, type 1]
-ok   ld links an executable for ARM [machine 40, type 2, 4576 bytes]
-ok   the entry point is Thumb [entry 0x1]
-ok   the linked image holds the Thumb encodings of the source
-ok   the literal pool holds 0x20001000
-ok   objcopy writes Intel HEX that parses and ends at EOF
-ok   the hex payload is the same image
-ok   ar writes a GNU archive
-ok   ld links from the archive ar wrote, giving the same image
-ok   a bad -mcpu makes as exit non-zero
-11/11 checks passed
-```
-
-The linked image is disassembled by hand: `01 48 01 21 01 60 fe e7` is
-`ldr r0, [pc, #4]; movs r1, #1; str r1, [r0]; b .` and the literal that follows
-is `0x20001000`. The archive check links from `libblink.a` instead of the
-object, because an archive is only worth writing if `ld` can read it back.
-
-What is still missing is the front end: `cc1`/`cc1plus` for `arm-none-eabi`.
-The same script fills that gap when it is written, and the sysroot does not need
-building — Seeed's `arm-none-eabi-gcc` package ships `arm-none-eabi/include`,
-`lib` and `lib/gcc/.../{crtbegin.o,libgcc.a}`, the same shape as the AVR sysroot
-this page already carries. Until then nothing can compile C for the XIAO, and
-the page says so.
 
 **Board URLs and archives without CORS headers.** A server only sends
 `access-control-allow-origin` when the request carries an `Origin` header, so
@@ -197,23 +151,31 @@ supplies the vendor and product ids from WebSerial instead, which is enough for
 
 ## Compiling on the page
 
-The page compiles AVR sketches. Open it, press **Install arduino:avr**, paste a
-sketch, press **Compile**. The result is a `.hex` you can download, plus the
-CLI's own size report.
+The page compiles for both boards it ships an index for. Press **Install
+arduino:avr** or **Install Seeeduino:nrf52**, choose the board, paste a sketch,
+press **Compile**. The result is a `.hex` you can download, plus the CLI's own
+size report — and for the XIAO a DFU `.zip` as well, which is what a flasher
+consumes.
 
 Nothing is faked at the CLI's boundary: `arduino-cli` runs its real builder,
-its real recipes on the real platform, and asks for `avr-g++` the same way it
-would on a machine with the toolchain installed. What differs is what answers.
+its real recipes on the real platform, and asks for `avr-g++` or
+`arm-none-eabi-g++` the same way it would on a machine with the toolchain
+installed. What differs is what answers.
 
 ### The seam
 
 The builder starts tools through `go-paths-helper`, a vendored copy of
 `github.com/arduino/go-paths-helper` whose `Process.Start`/`Wait` call a hook
 (`overlay/wasm/exec_js.go`). Under `GOOS=js` that hook hands the command line to
-`globalThis.arduinoExec(request, callback)`. `web/avr-exec.js` installs it,
-`web/avr-driver.js` answers it. Nothing else in the CLI was changed for this.
+`globalThis.arduinoExec(request, callback)`. `web/exec.js` installs it and picks
+a driver by tool name: `web/avr-driver.js` answers `avr-*` and `avrdude`,
+`web/arm-driver.js` answers `arm-none-eabi-*` and `(adafruit-)nrfutil`. Nothing
+else in the CLI was changed for this.
 
-### The compiler
+Only the toolchain a compile actually reaches is loaded: an AVR session never
+decompresses the ARM sysroot, and the other way round.
+
+### The AVR compiler
 
 `web/tools/avr/` holds a wasm build of avr-gcc's own programs — `cc1plus`, `as`,
 `ld`, `objcopy` — collected from `startabit/avr-gcc-wasm`, a wasm build of GCC
@@ -239,24 +201,33 @@ architectures, with the macro spelling each device selects on.
 
 ### The sysroot
 
-The release ships no headers and no libraries, so the page carries
-theirs: `sysroot.tar.gz` contains a GCC sysroot for AVR (avr-libc 2.0.0) and
-Arduino AVR core 1.8.8 with seven libraries, precompiled with Arduino's own
-native avr-gcc. The driver unpacks it into the filesystem on the first tool
-call; it is already committed, so a compile needs no network.
+The AVR release ships no headers and no libraries, so the page carries theirs:
+`sysroot.tar.gz` contains a GCC sysroot for AVR (avr-libc 2.0.0) and Arduino
+AVR core 1.8.8 with seven libraries, precompiled with Arduino's own native
+avr-gcc. For ARM the vendor package does ship them, so
+`scripts/make-arm-assets.py` cuts the sysroot out of Seeed's own tarball
+(`web/tools/arm/sysroot.tar.gz`, 1,463 files). The driver unpacks the one it
+needs into the filesystem on the first tool call; both are already committed,
+so a compile needs no network.
 
 ### What it cannot do
 
-- **No C++ standard library in the sysroot** — no `libstdc++.a`, no
+- **No C++ standard library in the AVR sysroot** — no `libstdc++.a`, no
   `avr/include/c++`. The driver compiles with `-fno-rtti`, so `typeid` and
   `dynamic_cast` do not link. Sketches that avoid them compile.
-- **C files are compiled as C++**, because only `cc1plus` was built to wasm.
-  `-fpermissive` covers most of it. `hooks.c` uses `__attribute__((alias(...)))`,
-  which C++ cannot express on a definition, so the driver rewrites that pattern
-  and logs every rewrite. Any other C construct C++ cannot express fails
-  loudly.
-- **No upload.** `avrdude` is not implemented.
-- **Only AVR.** The seam is general; the toolchain is not.
+- **AVR C files are compiled as C++**, because only `cc1plus` was built to
+  wasm for that target. `-fpermissive` covers most of it. `hooks.c` uses
+  `__attribute__((alias(...)))`, which C++ cannot express on a definition, so
+  the driver rewrites that pattern and logs every rewrite. Any other C
+  construct C++ cannot express fails loudly.
+- **Only `thumb/v7e-m+fp/hard` is in the ARM sysroot.** That is the multilib
+  the XIAO nRF52840 links against. A soft-float or Cortex-M0 board would need
+  its own, and the driver says which one it wanted rather than failing inside
+  `ld`.
+- **No upload**, for either board. `avrdude` and `adafruit-nrfutil dfu serial`
+  are not implemented; the DFU *packaging* step is (`web/nrfutil.js`).
+- **Two toolchains, two boards.** The seam is general; the drivers cover AVR
+  and the nRF52 boards of the Seeed platform.
 
 ### The index the page carries
 
@@ -264,6 +235,14 @@ call; it is already committed, so a compile needs no network.
 Arduino AVR core archive. Its tool entries are dummy archives that are never
 executed — `web/avr-driver.js` answers every tool call — so the installer finds
 the tools its index promises. `web/indexes/avr/README.md` says so in place.
+`web/indexes/nrf52/` does the same for `Seeeduino:nrf52@1.1.9`, and there the
+CMSIS archive is real because `ld` reads its `.a`; `web/indexes/nrf52/README.md`
+says what is real and what is a stand-in.
+
+The two indexes must not share a file name. `arduino-cli` saves each one under
+the basename of its URL, so a second `package_index.json` overwrites the first
+in its data directory and that platform disappears; the AVR one is
+`package_index.json` and the nRF52 one is `nrf52_index.json`.
 
 The index's URLs point at `https://arduino-wasm.invalid/`, a host that does not
 exist. `arduino-cli` uses that URL verbatim, so the page installs a `fetch` shim
@@ -287,16 +266,28 @@ scripts/build-ide.py        builds the arduino-ide frontend for the browser
 scripts/fetch-avr-tools.py  downloads the wasm AVR toolchain, verifies hashes
 scripts/make-avr-index.py   builds the package index the page installs from
 scripts/gen-avr-mcus.py     generates web/avr-mcus.js from GCC's avr-mcus.def
-scripts/build-arm-tools.py  builds gas, ld, objcopy, ar for arm-none-eabi as wasm
+scripts/build-arm-tools.py  builds binutils and GCC for arm-none-eabi as wasm
+scripts/make-arm-assets.py  packs the wasm tools and the vendor sysroot into web/tools/arm
+scripts/make-nrf52-index.py builds the Seeed index the page installs from
 web/index.html, app.js      the page
-web/page-avr.js             the page's half of the toolchain: index shim, loader
+web/page-index.js           the shipped index directories, and the fetch shim that maps them
+web/page-tools.js           installs both toolchains behind the one exec seam
+web/page-drivers.js         routes a tool name to the AVR or the ARM driver
+web/exec.js                 the seam itself: request in, one driver's answer out
 web/avr-driver.js           answers avr-g++/ar/size/ctags with wasm tools
-web/avr-exec.js             installs globalThis.arduinoExec over the CLI's seam
+web/arm-driver.js           answers arm-none-eabi-g++/ar/size and nrfutil the same way
+web/avr-exec.js             installs that seam over the CLI's exec hook
+web/arm-exec.js             the same, priming the ARM toolchain
+web/nrfutil.js              adafruit-nrfutil's `dfu genpkg`, ported to JavaScript
 web/avr-assets.js           one asset loader, shared by the page and the tests
+web/arm-assets.js           the ARM one: six wasm modules and the sysroot archive
 web/arm-tools.js            runs a wasm ARM tool: stage inputs, call main, read outputs
+web/tool-common.js          the helpers both drivers need: flags, ELF, Intel HEX
 web/avr-mcus.js             generated device to architecture and macro table
 web/tools/avr/              the wasm AVR toolchain, with PROVENANCE.md
+web/tools/arm/              the wasm ARM toolchain and sysroot, with PROVENANCE.md
 web/indexes/avr/            the package index the page carries, with README.md
+web/indexes/nrf52/          the Seeed index the page carries, with README.md
 web/nodefs.js               filesystem shim: IndexedDB or memory, callback API
 web/package.json            marks the page's JavaScript as ES modules for Node
 web/arduino-cli.wasm        the build output
@@ -352,6 +343,84 @@ python3 scripts/update.py --reuse --src build/arduino-cli --tag v1.6.0
 ```
 
 `--tag` is required with `--reuse` unless the clone is exactly on a tag.
+
+## Building the ARM toolchain
+
+`arm-none-eabi-gcc` cannot run in a page, but its source is free, so the route
+taken for AVR works here too: build the pieces to wasm and supply the target's
+headers and libraries from the vendor package, which already ships them.
+
+`scripts/build-arm-tools.py` does the whole build, with every stage on its own
+and every download checked against a pinned SHA-256:
+
+| stage | what it builds | source |
+| --- | --- | --- |
+| `binutils` | `gas`, `ld`, `objcopy`, `ar` for `arm-none-eabi` | binutils 2.42 |
+| `hostlibs` | GMP 6.2.1, MPFR 4.1.0, MPC 1.2.1 for the wasm host | the GCC prerequisite list |
+| `sources` | a GCC 9.2.0 tree, configured with the host libraries and `--target=arm-none-eabi` | gcc 9.2.0 |
+| `install` | copies every finished program and its JS glue into `build/arm-wasm/out/` | — |
+
+It needs an activated emsdk (`EMSDK` in the environment, or
+`../.scratch/toolchain/emsdk`). Measured 2026-11-15 on this machine, 12 cores:
+binutils took 1m57s, the host libraries 1m39s, and the compiler stage built both
+front ends:
+
+```
+cc1.wasm      18880170 bytes   cc1.mjs      118726 bytes
+cc1plus.wasm  20407202 bytes   cc1plus.mjs  119934 bytes
+ as.wasm       1232833 bytes    ar.wasm       574153 bytes
+ ld.wasm       1215635 bytes    objcopy.wasm  758535 bytes
+```
+
+The `.mjs` sizes match the AVR release's for the same Emscripten version.
+
+The compiler version is not a preference: the platform declares
+`arm-none-eabi-gcc 9-2019q4`, and the vendor tarball that index points at
+reports `9.2.1 20191025 (release) [ARM/arm-9-branch revision 277599]`. GCC
+9.2.0 is therefore what gets built, and the vendor's `9.2.1` library directory
+is mounted where the wasm compiler looks for it. The sysroot comes out of that
+same tarball (116,802,378 bytes, verified against a pinned SHA-256 and the MD5
+the board index publishes); `scripts/make-arm-assets.py` cuts it down to the
+header trees, the multilib the platform links against
+(`thumb/v7e-m+fp/hard`) and the C/C++ runtime, and packs it as
+`sysroot.tar.gz` — 1,463 files, 28,801,608 bytes of payload, 5,037,911 bytes
+compressed.
+
+`test/arm-tools.mjs` runs the binutils and checks the bytes rather than the exit
+codes:
+
+```
+$ node test/arm-tools.mjs
+ok   gas assembles a Thumb object [exit 0, 700 bytes]
+ok   the object is ELF32 for ARM (machine 40) [machine 40, type 1]
+ok   ld links an executable for ARM [machine 40, type 2, 4576 bytes]
+ok   the entry point is Thumb [entry 0x1]
+ok   the linked image holds the Thumb encodings of the source
+ok   the literal pool holds 0x20001000
+ok   objcopy writes Intel HEX that parses and ends at EOF
+ok   the hex payload is the same image
+ok   ar writes a GNU archive
+ok   ld links from the archive ar wrote, giving the same image
+ok   a bad -mcpu makes as exit non-zero
+11/11 checks passed
+```
+
+The linked image is disassembled by hand: `01 48 01 21 01 60 fe e7` is
+`ldr r0, [pc, #4]; movs r1, #1; str r1, [r0]; b .` and the literal that follows
+is `0x20001000`. The archive check links from `libblink.a` instead of the
+object, because an archive is only worth writing if `ld` can read it back. The
+last check is the one that mattered most: the loader used to report `exit 0`
+for an assembler that rejected its own flags, because Emscripten's `quit_`
+throws and its status was being discarded.
+
+`web/arm-driver.js` is what turns the platform's `g++` recipes into calls to
+those programs, and it is the same shape as the AVR driver: it resolves the
+multilib, stages the headers the source includes, preprocesses `.S` before
+assembling, rewrites a linker script's `INCLUDE` to an absolute path, supplies
+`size` and `ctags` itself, and logs every flag it cannot honour instead of
+dropping it. That driver is what makes `test/nrf52.mjs` and
+`test/page-nrf52.mjs` end in a linked image.
+
 
 ## Configuration
 
@@ -525,6 +594,8 @@ node test/run.mjs            # the CLI, through the same sequence the IDE uses
 node test/page.mjs           # the page itself, headless
 node test/avr.mjs            # install the AVR core, compile blink, check the hex
 node test/page-compile.mjs   # the same compile through the page's own controls
+node test/nrfutil.mjs        # the DFU package writer, against goldens
+node test/page-nrf52.mjs     # install the Seeed core, compile blink, check the zip
 python3 test/serve_test.py   # the static server's headers
 python3 test/gateway_test.py # the CORS gateway, over a socket pair
 node test/gateway.mjs        # the gateway URL rewrite in Go's transport
@@ -532,6 +603,10 @@ node test/ide.mjs            # the real IDE frontend, headless Chrome, needs a b
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
+
+`test/arm-tools.mjs` is not in that list because it needs `build/arm-wasm/out/`,
+which a fresh clone does not have: the tools are built by the script and
+gitignored. `test/nrf52.mjs` needs the network. Everything else runs in CI.
 
 `test/run.mjs` drives the wasm CLI directly: init, index update, platform
 search, platform install (with its tools), library install, board
@@ -566,7 +641,30 @@ cannot reach. Removing the page's toolchain install makes it fail with
 binary and Intel HEX, `ar` and a second link from the archive — and checks the
 linked bytes against the Thumb encodings the source must produce. It exits 2
 when `build/arm-wasm/out/` is absent, because those tools are built locally and
-not committed; there is no compiler for ARM yet, so no CI step builds them.
+not committed; CI does not build them.
+
+`test/nrfutil.mjs` checks the JavaScript port of `adafruit-nrfutil dfu genpkg`
+against committed goldens — entry names, the `.dat` layout, the CRC, the
+manifest — and, when `NRFUTIL_BIN` names a real `adafruit-nrfutil`, generates the
+same package with both and compares entry by entry. The goldens were produced by
+the real tool, so the test does not merely agree with itself.
+
+`test/nrf52.mjs` is the whole pipeline for the XIAO nRF52840 through the wasm
+CLI: it installs the Seeed platform from its real index, compiles blink, and
+checks the ELF, the Intel HEX, the reset vector it finds by searching for the
+ELF's own entry point, the CLI's size line, and the DFU zip. With `NRFUTIL_BIN`
+set it also regenerates that zip with the real tool and compares all three
+entries. `NRF52_DUMP=<dir>` writes the build's artefacts out for inspection.
+
+`test/page-nrf52.mjs` is the same compile through `web/app.js` and the page's own
+buttons, with the page's shipped index and the `web/tools/arm/` assets: it
+presses **Install Seeeduino:nrf52**, compiles, and checks the size line, the
+`.hex`, and the `.zip` contents. That is the test that proves the ARM pipeline
+works from the committed assets rather than from `build/arm-wasm/out/`.
+
+`test/zip.mjs` is the zip reader both of those use; it reads the central
+directory and asserts the compression method, so a writer that lies about its
+method fails the test rather than the flasher.
 
 `test/ide.mjs` boots the built IDE frontend in headless Chrome over a CDP pipe
 and asserts what the app itself reports: the shell has body text, the title
