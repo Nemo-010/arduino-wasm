@@ -88,7 +88,7 @@ class Pipe {
   }
 }
 
-export async function launch({ url, waitMs = 20000, shot, evaluate }) {
+export async function launch({ url, waitMs = 20000, shot, evaluate, steps = [] }) {
   mkdirSync('/workspace/.scratch/chrome-profile-ide', { recursive: true });
   const child = spawn(
     CHROME,
@@ -226,6 +226,41 @@ export async function launch({ url, waitMs = 20000, shot, evaluate }) {
 
   if (evaluate) {
     state.evaluated = await probe(evaluate);
+  }
+
+  // A page whose work takes minutes — installing a 23 MB core, compiling a
+  // sketch — cannot be driven by one evaluate. Steps wait on this side and read
+  // on that side, so the page's own event loop stays free between them.
+  if (steps.length > 0) {
+    state.steps = [];
+    for (const step of steps) {
+      if (step.until) {
+        // A step that waits for a condition is bounded and says so: an expired
+        // stop records the last value it read, so a stall is diagnosable rather
+        // than looking like an assertion that was never reached.
+        const deadline = Date.now() + (step.timeout || 300000);
+        let value;
+        for (;;) {
+          await new Promise(resolve => setTimeout(resolve, step.wait || 3000));
+          value = await probe(step.evaluate);
+          if (step.until(value)) {
+            break;
+          }
+          if (Date.now() > deadline) {
+            value = "<until expired after " + Math.round((step.timeout || 300000) / 1000) + "s: " + value + ">";
+            break;
+          }
+        }
+        state.steps.push(value);
+        continue;
+      }
+      if (step.wait) {
+        await new Promise(resolve => setTimeout(resolve, step.wait));
+      }
+      if (step.evaluate) {
+        state.steps.push(await probe(step.evaluate));
+      }
+    }
   }
 
   if (shot) {

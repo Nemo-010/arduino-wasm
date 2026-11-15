@@ -596,6 +596,7 @@ node test/avr.mjs            # install the AVR core, compile blink, check the he
 node test/page-compile.mjs   # the same compile through the page's own controls
 node test/nrfutil.mjs        # the DFU package writer, against goldens
 node test/page-nrf52.mjs     # install the Seeed core, compile blink, check the zip
+NETWORK=1 node test/live.mjs # the deployed page, in Chrome, over HTTP
 python3 test/serve_test.py   # the static server's headers
 python3 test/gateway_test.py # the CORS gateway, over a socket pair
 node test/gateway.mjs        # the gateway URL rewrite in Go's transport
@@ -660,7 +661,21 @@ entries. `NRF52_DUMP=<dir>` writes the build's artefacts out for inspection.
 buttons, with the page's shipped index and the `web/tools/arm/` assets: it
 presses **Install Seeeduino:nrf52**, compiles, and checks the size line, the
 `.hex`, and the `.zip` contents. That is the test that proves the ARM pipeline
-works from the committed assets rather than from `build/arm-wasm/out/`.
+works from the committed assets rather than from `build/arm-wasm/out/`. It does
+not press **Update indexes** first, because a first visit has none: installing a
+core refreshes the package indexes itself, and removing that refresh from
+`installCoreNamed` fails this test with `package Seeeduino not found`.
+
+`test/live.mjs` is the only test that uses a real browser against a real origin.
+Every other page test fakes the DOM and reaches the page's files through a
+stubbed XHR, so none of them can say whether the page served by Pages loads its
+own assets and its shipped indexes. This one loads the deployed URL in headless
+Chrome, presses **Install Seeeduino:nrf52** once, compiles, and asserts the
+flash line, the `.hex` download, no uncaught exception, and that the only failed
+request is the library index on `downloads.arduino.cc`, which sends no CORS
+header to this page. It needs the Electrosphere, so it runs only with
+`NETWORK=1` and exits 2 without it:
+`NETWORK=1 node test/live.mjs [url]`.
 
 `test/zip.mjs` is the zip reader both of those use; it reads the central
 directory and asserts the compression method, so a writer that lies about its

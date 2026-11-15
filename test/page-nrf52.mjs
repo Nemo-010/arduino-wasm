@@ -121,17 +121,20 @@ async function main() {
   );
 
   console.log("\nInstall " + FQBN.split(":").slice(0, 2).join(":") + " from the shipped index");
-  await byId.get("update").onclick();
+  // No press of "Update indexes": a first visit has no indexes, and installing a
+  // core is the page's whole first run. Removing the refresh inside
+  // installCoreNamed fails the next three assertions with
+  // "package Seeeduino not found".
+  await byId.get("core-install-nrf52").onclick();
+  await waitFor(() => !byId.get("core-install-nrf52").disabled, "the install to finish", 600000);
   // The fake DOM joins log lines without a separator, so this asserts the
   // exact sentence the page writes rather than a pattern across lines.
   const indexRead = log().includes("indexes/nrf52/nrf52_index.json STATUS_UPDATED");
   check(
     indexRead,
-    "the nRF52 index was read through the page's own shim" +
+    "the install read the nRF52 index through the page's own shim" +
       (indexRead ? "" : ": " + log().slice(-300)),
   );
-  await byId.get("core-install-nrf52").onclick();
-  await waitFor(() => !byId.get("core-install-nrf52").disabled, "the install to finish", 600000);
   check(
     log().includes("Installed Seeeduino:nrf52"),
     "the core installed" + (log().includes("Installed") ? "" : ": " + log().split("\n").slice(-6).join(" | ")),

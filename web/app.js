@@ -221,8 +221,10 @@ async function init() {
 // ---------------------------------------------------------------------------
 // Indexes
 
-async function updateIndexes() {
-  busy(true);
+// The package indexes, without the library index. Installing a core needs only
+// the former, and the latter is a 30 MB download from a host that may refuse
+// this page, so it is not dragged into an install.
+async function updatePackageIndexes() {
   log("Updating package indexes");
   try {
     const result = await call("UpdateIndex", { instance, updateIfOlderThanSecs: 0 });
@@ -232,6 +234,12 @@ async function updateIndexes() {
   } catch (error) {
     log(`  ${error.message}`, "err");
   }
+  await init();
+}
+
+async function updateIndexes() {
+  busy(true);
+  await updatePackageIndexes();
 
   log("Updating library index");
   try {
@@ -311,6 +319,7 @@ async function installCore(packager, architecture, version) {
   busy(true);
   log(`Installing ${packager}:${architecture}@${version}`);
   try {
+    await updatePackageIndexes();
     await call("PlatformInstall", {
       instance,
       platformPackage: packager,
@@ -526,6 +535,10 @@ async function installCoreNamed(packager, architecture, button) {
   button.disabled = true;
   log(`Installing ${label}`);
   try {
+    // A fresh visit has no indexes at all, so an install that assumed one would
+    // fail with "package Seeeduino not found" and blame the platform. The
+    // page's first run is one click: the index arrives with the install.
+    await updatePackageIndexes();
     await call("PlatformInstall", {
       instance,
       platformPackage: packager,
