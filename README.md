@@ -675,7 +675,12 @@ flash line, the `.hex` download, no uncaught exception, and that the only failed
 request is the library index on `downloads.arduino.cc`, which sends no CORS
 header to this page. It needs the Electrosphere, so it runs only with
 `NETWORK=1` and exits 2 without it:
-`NETWORK=1 node test/live.mjs [url]`.
+`NETWORK=1 node test/live.mjs [url]`. It starts from a fresh Chrome profile
+every run, because the platform lives in IndexedDB and a profile that kept it
+would skip the first run. Against the deployed page on 2026-11-15 that took
+**909 s end to end**: the install of the Seeed core, then a compile the page
+reported as 270.2 s producing `26816 bytes of flash`. Nothing is cached between
+runs, so that is what a first visit costs in this browser on this machine.
 
 `test/zip.mjs` is the zip reader both of those use; it reads the central
 directory and asserts the compression method, so a writer that lies about its

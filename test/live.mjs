@@ -18,6 +18,8 @@
 // downloads.arduino.cc, which refuses this page, so its failure is expected and
 // asserted as such rather than treated as a defect.
 
+import { rmSync } from "node:fs";
+
 import { launch } from "./cdp.mjs";
 import { check } from "./dom.mjs";
 
@@ -31,47 +33,75 @@ if (realProcess.env.NETWORK !== "1") {
 
 const url = realProcess.argv[2] || DEFAULT_URL;
 const FQBN = "Seeeduino:nrf52:xiaonRF52840";
-const INSTALL_TIMEOUT = 900000;
+const INSTALL_TIMEOUT = 600000;
 const COMPILE_TIMEOUT = 900000;
 
 const text = (id) => `document.getElementById(${JSON.stringify(id)}).textContent`;
-const logText = "document.getElementById(\"log\").textContent";
 const statusText = text("compile-status");
-const compileOut = text("compile-out");
+const compileOut = text("compile-out");  // whole: the board line is at the head
+
+// Only a tail is read while polling. The install log grows past 100 KB, and
+// shipping all of it through the debugging pipe every few seconds turned a
+// 60-second install into a 16-minute wait.
+const logTail = 'document.getElementById("log").textContent.slice(-600)';
+const logText = 'document.getElementById("log").textContent.slice(-4000)';
+
+// A fresh profile every run: the platform lives in IndexedDB, and a profile
+// that kept it would skip the first run this test exists to measure.
+const profile = "/tmp/arduino-wasm-live-profile";
+rmSync(profile, { recursive: true, force: true });
 
 const started = Date.now();
 const result = await launch({
   url,
   waitMs: 30000,
+  profile,
   shot: "/tmp/live.png",
   steps: [
     {
       evaluate: `JSON.stringify({
         title: document.title,
         nrf52: !!document.getElementById("core-install-nrf52"),
-        hex: document.getElementById("hex-download").getAttribute("href"),
       })`,
     },
     { evaluate: 'document.getElementById("core-install-nrf52").click(), "clicked"' },
     {
       wait: 5000,
       timeout: INSTALL_TIMEOUT,
-      evaluate: logText,
+      evaluate: logTail,
+      // Not /failed/: the boot log already carries "Download failed" for the
+      // library index, which would stop this at the first poll and grade the
+      // page mid-install.
       until: (value) =>
-        typeof value === "string" && /Installed Seeeduino:nrf52|package Seeeduino not found|failed/.test(value),
+        typeof value === "string" &&
+        /Installed Seeeduino:nrf52|package Seeeduino not found|Installation failed/.test(value),
     },
     {
+      // installCoreNamed re-enables the button a task after the log line, so the
+      // state is read once that task has run.
+      wait: 2000,
       evaluate: `JSON.stringify({
-        installButtonDisabled: document.getElementById("core-install-nrf52").disabled,
+        installDisabled: document.getElementById("core-install-nrf52").disabled,
         status: ${statusText},
       })`,
+    },
+    { evaluate: logText },
+    {
+      // The board select is the page's own way of choosing what to compile for:
+      // a fresh profile has no AVR core, so the default board cannot build.
+      evaluate: `(function () {
+        const select = document.getElementById("compile-board");
+        select.value = ${JSON.stringify(FQBN)};
+        select.dispatchEvent(new Event("change"));
+        return document.getElementById("compile-fqbn").value;
+      })()`,
     },
     { evaluate: 'document.getElementById("compile").click(), "clicked"' },
     {
       wait: 5000,
       timeout: COMPILE_TIMEOUT,
       evaluate: statusText,
-      until: (value) => typeof value === "string" && !/^compiling|^starting|^$/.test(value.trim()),
+      until: (value) => typeof value === "string" && /bytes of flash|failed|Error/.test(value),
     },
     { evaluate: statusText },
     { evaluate: compileOut },
@@ -90,8 +120,10 @@ console.log(`live: ${url} in ${elapsed} s`);
 const [
   boot,
   clickedInstall,
-  installLog,
+  installTail,
   installState,
+  installLog,
+  chosenFqbn,
   clickedCompile,
   compileStatus,
   compileStatusAgain,
@@ -99,31 +131,28 @@ const [
   downloadState,
 ] = result.state.steps;
 
-const bootInfo = JSON.parse(boot);
-check(
-  /arduino/i.test(bootInfo.title),
-  "the page is the one this repo ships: " + bootInfo.title,
-);
-check(bootInfo.nrf52, "the page offers the XIAO install button");
+const installSaw = String(installLog) + String(installTail);
+
+check(/arduino/i.test(JSON.parse(boot).title), "the page is the one this repo ships: " + JSON.parse(boot).title);
+check(JSON.parse(boot).nrf52, "the page offers the XIAO install button");
 check(clickedInstall === "clicked", "the install button clicked");
 
 // The failure text is checked first, so a failed install reports the page's own
-// words instead of an assertion that says only "not installed".
+// words rather than an assertion that says only "not installed".
 check(
-  typeof installLog === "string" && !installLog.includes("package Seeeduino not found"),
+  !installSaw.includes("package Seeeduino not found"),
   "the install found the platform in the shipped index" +
-    (typeof installLog === "string" && installLog.includes("package Seeeduino not found")
+    (installSaw.includes("package Seeeduino not found")
       ? ": the page has no index — the install did not refresh it"
       : ""),
 );
 check(
-  typeof installLog === "string" && installLog.includes("Installed Seeeduino:nrf52"),
-  "the core installed from the shipped index" +
-    (typeof installLog === "string" ? ": " + installLog.replace(/\s+/g, " ").slice(-400) : ""),
+  installSaw.includes("Installed Seeeduino:nrf52"),
+  "the core installed from a fresh profile: " + installSaw.replace(/\s+/g, " ").slice(-300),
 );
-const installed = JSON.parse(installState);
-check(!installed.installButtonDisabled, "the install button was re-enabled");
+check(!JSON.parse(installState).installDisabled, "the install button was re-enabled");
 
+check(chosenFqbn === FQBN, "choosing the board set the FQBN: " + chosenFqbn);
 check(clickedCompile === "clicked", "the compile button clicked");
 check(
   typeof compileStatus === "string" && /bytes of flash/.test(compileStatus),
@@ -134,8 +163,12 @@ check(
   "the compile status held: " + compileStatusAgain,
 );
 check(
-  typeof compileLog === "string" && compileLog.includes(FQBN),
-  "the compile named the board: " + String(compileLog).slice(0, 200),
+  typeof compileLog === "string" && /Sketch uses \d+ bytes/.test(compileLog),
+  "the CLI reported the program size: " + String(compileLog).slice(-300),
+);
+check(
+  typeof compileLog === "string" && !/link failed|undefined reference|no implementation/.test(compileLog),
+  "the build has no unresolved symbols or unanswered tools",
 );
 const downloads = JSON.parse(downloadState);
 check(downloads.hex === "string" && !downloads.hexHidden, "the page offers the .hex for download");
@@ -154,9 +187,6 @@ check(
   result.exceptions.length === 0,
   "the page raised no uncaught exception: " + JSON.stringify(result.exceptions.slice(0, 3)),
 );
-check(
-  result.state.errors === "[]",
-  "no error event fired: " + result.state.errors,
-);
+check(result.state.errors === "[]", "no error event fired: " + result.state.errors);
 
 console.log(`\nall checks passed in ${elapsed} s (screenshot /tmp/live.png)`);

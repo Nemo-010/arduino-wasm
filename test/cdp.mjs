@@ -88,8 +88,8 @@ class Pipe {
   }
 }
 
-export async function launch({ url, waitMs = 20000, shot, evaluate, steps = [] }) {
-  mkdirSync('/workspace/.scratch/chrome-profile-ide', { recursive: true });
+export async function launch({ url, waitMs = 20000, shot, evaluate, steps = [], profile = '/workspace/.scratch/chrome-profile-ide' }) {
+  mkdirSync(profile, { recursive: true });
   const child = spawn(
     CHROME,
     [
@@ -100,7 +100,7 @@ export async function launch({ url, waitMs = 20000, shot, evaluate, steps = [] }
       '--allow-file-access-from-files',
       '--no-first-run',
       '--no-default-browser-check',
-      '--user-data-dir=/workspace/.scratch/chrome-profile-ide',
+      '--user-data-dir=' + profile,
       '--window-size=1440,900',
       '--remote-debugging-pipe',
       'about:blank',
@@ -170,6 +170,10 @@ export async function launch({ url, waitMs = 20000, shot, evaluate, steps = [] }
 
   await commands.send('Runtime.enable', {}, sessionId);
   await commands.send('Network.enable', {}, sessionId);
+  // A reused profile serves app.js from its own cache, so a test would grade
+  // the previous deploy. GitHub Pages allows a ten-minute cache, which is right
+  // for a reader and wrong for a driver.
+  await commands.send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
   // Trap errors raised before the page's own code can report them.
   await commands.send(
     'Page.addScriptToEvaluateOnNewDocument',
