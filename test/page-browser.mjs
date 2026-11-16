@@ -95,14 +95,37 @@ try {
         evaluate: "document.getElementById('log').textContent",
       },
       {
+        // The button is disabled until the CLI is ready. Clicking it before
+        // then does nothing, and the old `disabled === false` wait returned
+        // immediately -- CI compiled before the platform existed and failed
+        // with `Platform 'arduino:avr' not found`.
+        until: (value) => String(value) === "false",
+        timeout: 180000,
+        wait: 1000,
+        evaluate: "String(document.getElementById('core-install-avr').disabled)",
+      },
+      {
         wait: 200,
         evaluate: "document.getElementById('core-install-avr').click(); 'installing'",
       },
       {
-        until: (value) => String(value) === "false",
+        // Re-enabling the button means the install FINISHED, not that it
+        // worked: installCoreNamed clears `disabled` in its catch too. Wait for
+        // the page's own success line, but stop as soon as a started install
+        // is over so a failure names itself instead of eating the timeout.
+        until: (value) => {
+          const s = JSON.parse(String(value));
+          return s.installed === true || s.enabled === true;
+        },
         timeout: 600000,
         wait: 2000,
-        evaluate: "String(document.getElementById('core-install-avr').disabled)",
+        evaluate:
+          "JSON.stringify({" +
+          "  started: document.getElementById('log').textContent.includes('Installing arduino:avr')," +
+          "  installed: document.getElementById('log').textContent.includes('Installed arduino:avr')," +
+          "  enabled: document.getElementById('core-install-avr').disabled === false," +
+          "  tail: document.getElementById('log').textContent.slice(-500)" +
+          "})",
       },
       {
         wait: 200,
@@ -131,10 +154,12 @@ try {
     ],
   });
 
-  const [boot, , , , , , , final] = state.steps.map(String);
+  const [boot, , , , , installedStep, , , final] = state.steps.map(String);
+  const install = JSON.parse(installedStep);
   const ui = JSON.parse(final);
 
   ok(/^arduino-cli v/.test(boot), "the page booted the wasm CLI: " + boot.slice(0, 60));
+  ok(install.installed === true, "the page installed arduino:avr", install.tail);
   ok(
     /^\d+ bytes of flash, [\d.]+ s$/.test(ui.compile),
     "the page shows bytes and seconds: " + ui.compile,
