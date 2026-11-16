@@ -264,6 +264,15 @@ def publish(out, services_bundle, frontend=None):
     # `frontend` lets a rebundled tree be republished without collecting it
     # into `out` first; the collected copy and the live one are the same files.
     shutil.copytree(Path(frontend) if frontend else out / "frontend", dst)
+    # What ships is what the page loads. Devtools fetch `.map` files and nothing
+    # else does; the `.gz` copies are for a server that pre-compresses, and
+    # Pages compresses on the fly. Both stay in `build/ide-dist/` for debugging,
+    # so the shipped tree is 33 MB instead of 119 MB.
+    dropped = 0
+    for path in list(dst.rglob("*")):
+        if path.is_file() and path.suffix in (".map", ".gz"):
+            dropped += path.stat().st_size
+            path.unlink()
     shutil.copy2(services_bundle, dst / "services.js")
     shutil.copy2(ROOT / "web/ide-boot.js", dst / "ide-boot.js")
 
@@ -277,7 +286,8 @@ def publish(out, services_bundle, frontend=None):
     index.write_text(text.replace(PAGE_BUNDLE_TAG, PAGE_SCRIPTS + "    " + PAGE_BUNDLE_TAG))
 
     size = sum(p.stat().st_size for p in dst.rglob("*") if p.is_file())
-    print("published: %s (%d bytes)" % (dst.relative_to(ROOT), size))
+    print("published: %s (%d bytes, %d bytes of maps and precompressed copies left out)"
+          % (dst.relative_to(ROOT), size, dropped))
     return dst
 
 

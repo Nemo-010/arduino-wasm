@@ -98,6 +98,57 @@ jobs:
       - name: Test the gateway rewrite
         run: node test/gateway.mjs
 
+      # The IDE page. Deliberately in this job rather than a second workflow:
+      # every deploy publishes the whole of `web/`, so a separate IDE workflow
+      # would blank `/ide/` for the length of each CLI deploy. A failure here
+      # stops the deploy, which is the intent -- the build is pinned to an
+      # arduino-ide tag, and a red run is how drift in that tree gets noticed.
+      # Pull requests skip it: this is a yarn install of a whole monorepo.
+      - uses: actions/cache@v5
+        if: github.event_name != 'pull_request'
+        with:
+          path: build/arduino-ide
+          key: arduino-ide-${{ hashFiles('scripts/build-ide.py') }}-node24
+
+      - name: Build the IDE frontend
+        if: github.event_name != 'pull_request'
+        run: |
+          if [ -d build/arduino-ide/electron-app ]; then
+            python3 scripts/build-ide.py --no-publish --reuse
+          else
+            python3 scripts/build-ide.py --no-publish
+          fi
+
+      - name: Build the IDE's services bundle
+        if: github.event_name != 'pull_request'
+        run: python3 scripts/build-ide-services.py
+
+      - name: Publish the IDE page into web/
+        if: github.event_name != 'pull_request'
+        run: python3 scripts/build-ide.py --reuse
+
+      # Both browser tests grade the tree that gets deployed, over `file://`,
+      # because this runner cannot serve it. They were local-only until the IDE
+      # tree was built here; now the artefact they grade is the one in `web/`.
+      - name: Find Chrome
+        run: |
+          for name in google-chrome google-chrome-stable chromium chromium-browser; do
+            if path=$(command -v "$name"); then
+              echo "ARDUINO_WASM_CHROME=$path" >> "$GITHUB_ENV"
+              echo "chrome: $path"
+              exit 0
+            fi
+          done
+          echo "no Chrome on this runner, so the page cannot be graded"
+          exit 1
+
+      - name: Test the CLI page in a browser
+        run: node test/page-browser.mjs
+
+      - name: Test the IDE page in a browser
+        if: github.event_name != 'pull_request'
+        run: node test/ide-page.mjs
+
       - uses: actions/configure-pages@v6
 
       - uses: actions/upload-pages-artifact@v5
