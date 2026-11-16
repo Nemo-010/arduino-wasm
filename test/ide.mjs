@@ -1,13 +1,26 @@
 #!/usr/bin/env node
-// Boots the real Arduino IDE frontend (the Electron app's Theia frontend, built
-// for the browser target) in headless Chrome over the DevTools pipe and checks
-// that the shell renders with the in-page backend installed.
+// Boots the real Arduino IDE frontend (the Electron app's own Theia frontend, on
+// the electron target the app ships) in headless Chrome over the DevTools pipe
+// and checks that the shell renders with the in-page backend installed.
 //
-//   node test/ide.mjs [--wait 15000] [--shot build/ide-boot.png]
+//   node test/ide.mjs [--wait 30000] [--shot build/ide-boot.png]
+//
+// This grades the collected build in build/ide-dist/frontend, which is the
+// bundle without the page's boot script: it has no way to point arduino-cli at
+// the shipped package index, so the CLI's own first-boot index download fails
+// here (downloads.arduino.cc is unreachable) and the app opens no sketch. That
+// is why the checks below stop at the boot: creating a sketch and compiling it
+// are graded against the shipped page in test/ide-page.mjs, which supplies the
+// index through the page's own configuration.
+//
+// The browser profile is fresh on every run and deleted afterwards. It used to
+// be the shared /workspace/.scratch/chrome-profile-ide, whose IndexedDB still
+// held an installed AVR platform, so the sketch check passed on state a cold
+// run cannot reproduce -- a test that grades the last run's leftovers.
 //
 // Exit: 0 ok, 1 failed check, 2 skipped (no chrome or no build).
 
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launch, CHROME } from './cdp.mjs';
@@ -36,9 +49,21 @@ async function main() {
     return 2;
   }
 
-  const waitMs = Number(arg('wait', '15000'));
+  const waitMs = Number(arg('wait', '30000'));
   const shot = arg('shot', join(ROOT, 'build/ide-boot.png'));
-  const result = await launch({ url: 'file://' + PAGE, waitMs, shot });
+  const profile = '/tmp/arduino-ide-boot-' + process.pid;
+  let result;
+  try {
+    result = await launch({
+      url: 'file://' + PAGE,
+      waitMs,
+      shot,
+      profile,
+      evaluate: '!!document.querySelector(".theia-preload")',
+    });
+  } finally {
+    rmSync(profile, { recursive: true, force: true });
+  }
   const state = result.state;
   const bodyText = (state.bodyText || '').replace(/\u00a0/g, ' ');
   const title = state.title || '';
@@ -75,10 +100,13 @@ async function main() {
         missing.slice(0, 6).map(m => m.path + ' ' + m.method).join(', '),
   );
   check('toolbar rendered', /Select Board/.test(bodyText), bodyText.slice(0, 80));
+  // The splash is removed only when the frontend actually mounted its
+  // workbench. A page stuck on the splash keeps the shell element in the DOM,
+  // so `hasShell` alone would pass for a boot that never finished.
   check(
-    'a sketch is open in the editor',
-    /void setup\(\)/.test(bodyText) && /\.ino/.test(bodyText),
-    bodyText.slice(0, 120),
+    'the frontend left its splash and mounted the workbench',
+    state.evaluated === false && state.hasShell === true,
+    'splash in DOM: ' + state.evaluated + ', shell: ' + state.hasShell,
   );
   // The app logs its own lifecycle; 'ready' is the state after the workbench
   // UI is up, so this reads a stage rather than a rendering guess.

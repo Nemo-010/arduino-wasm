@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Build the real Arduino IDE frontend (Theia) for the browser target.
+"""Build the real Arduino IDE frontend (Theia) as a page.
 
 Upstream arduino-ide is an Electron app: a Theia frontend plus a Theia Node
-backend.  Its postinstall steps download arduino-cli, the language server, the
+backend.  The build keeps the app's own `electron` target -- five of its browser
+contributions inject a service only the electron window module binds -- and skips
+the one step that belongs to that target's runtime, Electron's own preparation;
+`scripts/ide-build.cjs` records why and does it.  Its postinstall steps download arduino-cli, the language server, the
 firmware uploader and examples from downloads.arduino.cc, and build native Node
 addons.  This script does only what the browser bundle needs, because the point
 of this project is to run arduino-cli as wasm instead of shipping a binary.
@@ -208,10 +211,12 @@ def rebundle_frontend(app, env):
 
 
 def build_app(app, env):
-    # Theia's own flag is --app-target (values: browser|electron); --target is
-    # forwarded to webpack, which only knows web/node/electron-main.
-    run([which(env, "theia"), "build", "--app-target=browser"], app, env,
-        BUILD / "ide-webpack.log", "theia build --app-target=browser")
+    # scripts/ide-build.cjs runs `theia build` with one method replaced: the
+    # Electron runtime preparation, which needs node_modules/electron/dist and
+    # downloads Electron's ffmpeg for a binary this project never runs. See that
+    # file for why the app cannot declare a browser target instead.
+    run([which(env, "node"), str(ROOT / "scripts" / "ide-build.cjs"), str(app)],
+        app, env, BUILD / "ide-webpack.log", "theia build (Electron runtime skipped)")
     install_inpage(app)
     patch_entry(app)
     rebundle_frontend(app, env)

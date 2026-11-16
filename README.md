@@ -511,7 +511,9 @@ would work there and XHR works on both.
 ## The Arduino IDE frontend
 
 The page in `web/` is the CLI half. The IDE's own frontend is the Theia app from
-`arduino/arduino-ide`; `scripts/build-ide.py` builds it for the browser target.
+`arduino/arduino-ide`; `scripts/build-ide.py` builds it with the target the app
+ships, `electron`, and skips only the step that prepares an Electron *runtime*
+this page never runs.
 
 ```sh
 python3 scripts/build-ide.py            # clone 2.3.11 and build
@@ -539,12 +541,43 @@ Measured on 2026-11-14, tag `2.3.11`, Node 24.11.1: exit 0, frontend
 118,632,923 bytes, backend 75,289,689 bytes in `build/ide-dist/`. The frontend
 is larger than a plain browser build because `ide/inpage/` is bundled into it.
 
+#### Why the target stays `electron`
+
+Theia's `--app-target=browser` looks like the obvious switch for a page, and it
+is not usable here. Two measurements:
+
+- the flag never reaches the build. `@theia/cli/lib/theia.js:101` parses it with
+  `require("yargs/yargs")()` and no argv, so `appTarget` is `undefined` while the
+  real command parse below uses the `yargs` singleton, which does read
+  `process.argv`. Instrumented, the value was `appTarget= undefined argv= []`.
+- the target it names cannot boot this app. Built as `browser`, the page stays
+  on the splash forever with `Error: No matching bindings found for
+  serviceIdentifier: Symbol(WindowServiceExt)`. `WindowServiceExt` is defined in
+  `arduino-ide-extension/src/browser/theia/core/window-service-ext.ts` and bound
+  only by `src/electron-browser/theia/core/electron-window-module.ts`, while five
+  `src/browser/` contributions inject it (`check-for-updates`, `close`,
+  `update-indexes`, `monaco-theming-service`, `workspace-service`).
+
+So the app keeps its own target, and the one thing a page does not need is
+removed: `@theia/application-manager`'s `prepare()` downloads Electron, reads
+`node_modules/electron/dist/version` and installs a matching `libffmpeg.so` into
+it. `scripts/ide-build.cjs` replaces that method with a no-op and then runs
+upstream's CLI unchanged; `generate()`, `copy()` and the webpack pass are
+upstream's. The wrapper exits 4 if the CLI and the app resolve different copies
+of `@theia/application-manager` (a silent no-op otherwise), 3 if the method is
+gone, and 2 with no app path.
+
+The build is proven under CI's condition, not on a warm tree: with
+`node_modules/electron/dist` moved aside and `os.tmpdir()/theia-cli` deleted,
+`--reuse` exits 0 in 139 s and produces the same frontend bundle
+(`md5 f1f3518dd501ab2c2de30671d19ce787`).
+
 ### The in-page backend
 
-`--app-target=browser` is Theia's target name. It still emits a **Node
-backend**: the frontend asks for its services over Theia RPC on `/services`, so
-a browser build is normally a frontend plus a server process. `ide/inpage/`
-removes the server from the path without reimplementing the protocol:
+The build is a **frontend plus a Node backend**: the frontend asks for its
+services over Theia RPC on `/services`, so a build normally needs a server
+process beside it. `ide/inpage/` removes the server from the path without
+reimplementing the protocol:
 
 Theia's own `ChannelMultiplexer` and `RpcProxyFactory` are wired on both ends of
 an in-memory channel pair, and the provider symbols the frontend resolves
@@ -577,9 +610,18 @@ milliseconds.
 
 Measured in headless Chrome 157 on 2026-11-14: the workbench reaches `ready`
 1.708 s after frontend start, the toolbar renders `Select Board` and `No board
-selected`, a `sketch_20261114l.ino` is open in a Monaco editor with
-`void setup() {}`, and 120 RPC calls have been answered. `node test/ide.mjs`
-asserts those, and it fails six checks when the install line is removed.
+selected`, and 120 RPC calls have been answered. `node test/ide.mjs` asserts
+those and that the splash is gone, and it fails those checks when the install
+line is removed. It runs on a fresh browser profile and deletes it afterwards:
+while it used a shared one, its sketch check passed on an AVR platform left in
+that profile's IndexedDB, which a cold run cannot reproduce.
+
+Opening a sketch and compiling it are graded against the shipped page in
+`test/ide-page.mjs` instead. The collected build `test/ide.mjs` loads has no
+boot script, so it cannot point arduino-cli at the shipped package index; with
+`downloads.arduino.cc` unreachable the first-boot index download fails there and
+the app opens no sketch. That is a property of that tree, not of the page that
+ships.
 
 Every RPC the boot makes has an implementation; `window.__inpageMissing` is
 empty, and `test/ide.mjs` fails and names the method when one is not. Answering
