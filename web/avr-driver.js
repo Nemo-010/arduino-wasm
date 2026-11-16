@@ -36,6 +36,7 @@ import {
   basename,
   createToolInstance,
   elfSections,
+  ensureParent,
   flagValue,
   flagValues,
   hasFlag,
@@ -301,10 +302,7 @@ export async function createAvrDriver(options) {
 
     // The tool cannot write into a directory that does not exist in its own
     // filesystem, so every output's parent is created before the call.
-    for (const path of outputs || []) {
-      const parent = path && path.slice(0, path.lastIndexOf("/"));
-      if (parent) mkdirp(instance.FS, parent);
-    }
+    for (const path of outputs || []) ensureParent(instance.FS, path);
 
     await stage(instance.FS, { files, directories });
     for (const file of extra || []) writeFile(instance.FS, file.path, file.data);

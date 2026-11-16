@@ -8,12 +8,7 @@
 // One instance per call, not one per tool: a tool's own filesystem is where the
 // arguments point, and a linker run must not see a previous run's leftovers.
 
-import { createToolInstance } from "./tool-common.js";
-
-function mkdirp(FS, path) {
-  const parent = path.slice(0, path.lastIndexOf("/"));
-  if (parent && !FS.analyzePath(parent).exists) FS.mkdirTree(parent);
-}
+import { createToolInstance, ensureParent, writeFile } from "./tool-common.js";
 
 function readIfAny(FS, path) {
   const found = FS.analyzePath(path);
@@ -50,12 +45,9 @@ export function createArmTools({ importModule, readWasm, note }) {
       printErr: (line) => { stderr += line + "\n"; },
     });
 
-    for (const file of files) {
-      mkdirp(instance.FS, file.path);
-      instance.FS.writeFile(file.path, file.data);
-    }
+    for (const file of files) writeFile(instance.FS, file.path, file.data);
     for (const path of outputs) {
-      if (path && path !== "/dev/null") mkdirp(instance.FS, path);
+      if (path && path !== "/dev/null") ensureParent(instance.FS, path);
     }
 
     let code = 0;

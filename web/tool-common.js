@@ -73,9 +73,18 @@ export function mkdirp(FS, path) {
   }
 }
 
-export function writeFile(FS, path, data) {
-  const parent = path.slice(0, path.lastIndexOf("/"));
+// Creates the directory a file lives in. Named for what the caller means: the
+// path passed in is a file, so the last segment is not created as a directory.
+// (The ARM driver and the AVR driver each grew their own copy of this slice, and
+// the copy in `web/arm-tools.js` was called `mkdirp`, which is the *other*
+// helper below: it creates the path it is given.)
+export function ensureParent(FS, path) {
+  const parent = path ? path.slice(0, path.lastIndexOf("/")) : "";
   if (parent) mkdirp(FS, parent);
+}
+
+export function writeFile(FS, path, data) {
+  ensureParent(FS, path);
   FS.writeFile(path, data);
 }
 
