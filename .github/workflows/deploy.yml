@@ -150,6 +150,7 @@ jobs:
             if path=$(command -v "$name"); then
               echo "ARDUINO_WASM_CHROME=$path" >> "$GITHUB_ENV"
               echo "chrome: $path"
+              "$path" --version
               exit 0
             fi
           done

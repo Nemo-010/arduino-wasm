@@ -16,13 +16,14 @@
 // sandbox cannot bind a TCP port (`EACCES`).
 //
 // Run: node test/page-browser.mjs
-// Not in CI: the runner has no Chrome, and installing one there would grade a
-// different browser from the one the page is used in. `test/page-compile.mjs`
-// is the Node-side half that CI does run.
+// CI runs this too, with the runner's Chrome in ARDUINO_WASM_CHROME. The browser
+// version is printed at the start: a toolchain wasm that works in one Chrome can
+// fail to instantiate in another, and that difference is part of the result.
 // Exit: 0 pass, 1 a check failed, 2 a precondition is missing (browser, page
 //       assets, or a built page).
 // Writes: build/page-browser.png
 
+import { spawnSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -70,6 +71,8 @@ if (!existsSync(CHROME)) {
   realProcess.exit(2);
 }
 
+console.log("  chrome: " + String(spawnSync(CHROME, ["--version"], { encoding: "utf8" }).stdout || "").trim());
+
 const START = Date.now();
 try {
   const { state } = await launch({
@@ -108,7 +111,10 @@ try {
           "document.getElementById('compile').click(); 'compiling'",
       },
       {
-        until: (value) => /bytes of flash/.test(String(value)),
+        // Stop on a failed compile as well: waiting the full timeout for a
+        // phrase a failed run will never print costs ten minutes and hides the
+        // page's own error message.
+        until: (value) => /bytes of flash|failed/.test(String(value)),
         timeout: 600000,
         wait: 3000,
         evaluate: "document.getElementById('compile-status').textContent",
@@ -129,8 +135,12 @@ try {
   const ui = JSON.parse(final);
 
   ok(/^arduino-cli v/.test(boot), "the page booted the wasm CLI: " + boot.slice(0, 60));
-  ok(/^\d+ bytes of flash, [\d.]+ s$/.test(ui.compile), "the page shows bytes and seconds: " + ui.compile);
-  ok(ui.hex === true, "the page offers the .hex");
+  ok(
+    /^\d+ bytes of flash, [\d.]+ s$/.test(ui.compile),
+    "the page shows bytes and seconds: " + ui.compile,
+    ui.log,
+  );
+  ok(ui.hex === true, "the page offers the .hex", ui.compile);
   ok(
     ui.hex !== true || ui.hexName === "Sketch.ino.hex",
     "the .hex is named after the sketch: " + ui.hexName,
