@@ -25,17 +25,32 @@ Output: build/ide-dist/{frontend,backend} plus build.json.
 """
 
 import argparse
+import hashlib
+import io
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 DEFAULT_TAG = "2.3.11"
 NATIVES = ("drivelist", "keytar", "native-keymap", "node-pty")
+
+# @vscode/ripgrep's postinstall asks api.github.com for the release, which
+# answered 403 on a cold CI run. The release asset itself is reachable without
+# the API; pin both the archive and the binary inside it. The binary hash is
+# also the hash of the copy upstream's own postinstall fetched on 2026-11-13,
+# so this asset has been corroborated by two independent downloads.
+RIPGREP_TAG = "v13.0.0-10"
+RIPGREP_ASSET = "ripgrep-%s-x86_64-unknown-linux-musl.tar.gz" % RIPGREP_TAG
+RIPGREP_SHA256 = "ef820a62c1d6fdc396646762ff0f0e47e127947073ed8b5aa4ceea8b61cb1659"
+RIPGREP_RG_SHA256 = "7cdd80707c2841da469a64be650fcdbaa76c6c80aa9e8bd823eb96cafc39f827"
 
 
 def die(msg):
@@ -162,8 +177,35 @@ def build_natives(root, env, force):
         gyp(env, pkg, BUILD / ("ide-gyp-%s.log" % name), "node-gyp " + name)
     rg = root / "node_modules/@vscode/ripgrep"
     if rg.is_dir() and not (rg / "bin/rg").exists():
-        run([which(env, "node"), "./lib/postinstall.js"], rg, env,
-            BUILD / "ide-ripgrep.log", "@vscode/ripgrep postinstall")
+        if sys.platform == "linux" and platform.machine() in ("x86_64", "amd64"):
+            fetch_ripgrep(rg)
+        else:
+            # No pinned asset measured for this platform: let upstream decide,
+            # and say so rather than pretending the pin covers every host.
+            print("  => ripgrep: no pinned asset on this platform; using upstream's postinstall")
+            run([which(env, "node"), "./lib/postinstall.js"], rg, env,
+                BUILD / "ide-ripgrep.log", "@vscode/ripgrep postinstall")
+
+
+def fetch_ripgrep(rg):
+    url = ("https://github.com/microsoft/ripgrep-prebuilt/releases/download/"
+           + RIPGREP_TAG + "/" + RIPGREP_ASSET)
+    request = urllib.request.Request(url, headers={"User-Agent": "arduino-wasm-build/1"})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        archive = response.read()
+    digest = hashlib.sha256(archive).hexdigest()
+    if digest != RIPGREP_SHA256:
+        die("ripgrep archive sha256 %s, expected %s" % (digest, RIPGREP_SHA256))
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        binary = tar.extractfile(tar.getmember("rg")).read()
+    binary_digest = hashlib.sha256(binary).hexdigest()
+    if binary_digest != RIPGREP_RG_SHA256:
+        die("ripgrep binary sha256 %s, expected %s" % (binary_digest, RIPGREP_RG_SHA256))
+    target = rg / "bin" / "rg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(binary)
+    target.chmod(0o755)
+    print("  => ripgrep from %s (sha256 %s)" % (RIPGREP_ASSET, digest[:12]))
 
 
 def install_inpage(app):

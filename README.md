@@ -539,8 +539,11 @@ postinstall would have done, because those download binaries from
    `postbuild`);
 3. builds the `@theia/ffmpeg` addon, which the Theia CLI itself loads;
 4. builds `drivelist`, `keytar`, `native-keymap` and `node-pty`;
-5. runs `@vscode/ripgrep`'s postinstall for the binary the native webpack
-   plugin copies;
+5. fetches `@vscode/ripgrep`'s `rg` binary for the native webpack plugin from
+   the pinned release asset, checking both the archive and the binary hashes.
+   Upstream's postinstall asks `api.github.com` for the release and got 403 on a
+   cold CI run; the asset itself needs no API call. The binary hash agrees with
+   the copy upstream's postinstall fetched earlier, so the pin has two sources;
 6. writes `src/node/resources/examples/PLACEHOLDER.txt`, because the webpack
    CopyPlugin globs that directory while ignoring `i18n/**` and aborts when
    nothing matches.
