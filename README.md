@@ -472,7 +472,12 @@ The IDE page is deployed with it, at
 it rather than committing it: the `build` job clones the arduino-ide tag, runs
 the two build scripts, publishes into `web/ide/`, and uploads `web/` as one
 artefact. That makes a push take about fifteen minutes longer on a cold cache
-and pulls a 985 MB tree into `actions/cache` keyed on `scripts/build-ide.py`.
+and pulls a 985 MB tree into `actions/cache` keyed on `scripts/build-ide.py`
+and `ide/inpage/` -- those modules are copied into the clone, so a cache hit
+would otherwise rebundle the previous in-page backend. The job also installs
+`libsecret-1-dev`, `libx11-dev` and `libxkbfile-dev`: keytar's and
+native-keymap's `binding.gyp` files call `pkg-config` for them and the runner
+image does not ship them.
 
 It is in the same job as the CLI deploy on purpose. Every deploy publishes the
 whole of `web/`, so a separate IDE workflow would blank `/ide/` for the length

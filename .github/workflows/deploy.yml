@@ -104,11 +104,25 @@ jobs:
       # stops the deploy, which is the intent -- the build is pinned to an
       # arduino-ide tag, and a red run is how drift in that tree gets noticed.
       # Pull requests skip it: this is a yarn install of a whole monorepo.
+      # Theia's native addons are built here, and two of them want headers the
+      # runner does not ship: keytar's binding.gyp calls pkg-config for
+      # libsecret-1, and native-keymap's calls it for x11 and xkbfile. Named from
+      # those two binding.gyp files rather than from a general Theia list.
+      - name: Install the headers two native addons need
+        if: github.event_name != 'pull_request'
+        run: |
+          sudo apt-get update --quiet
+          sudo apt-get install -y --no-install-recommends \
+            libsecret-1-dev libx11-dev libxkbfile-dev
+
       - uses: actions/cache@v5
         if: github.event_name != 'pull_request'
         with:
           path: build/arduino-ide
-          key: arduino-ide-${{ hashFiles('scripts/build-ide.py') }}-node24
+          # ide/inpage goes into the cache key because install_inpage copies
+          # those modules into the clone; without them here a cache hit would
+          # rebundle the previous in-page backend.
+          key: arduino-ide-${{ hashFiles('scripts/build-ide.py', 'ide/inpage/**') }}-node24
 
       - name: Build the IDE frontend
         if: github.event_name != 'pull_request'
