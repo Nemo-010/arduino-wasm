@@ -747,6 +747,7 @@ node test/run.mjs            # the CLI, through the same sequence the IDE uses
 node test/page.mjs           # the page itself, headless
 node test/avr.mjs            # install the AVR core, compile blink, check the hex
 node test/page-compile.mjs   # the same compile through the page's own controls
+node test/page-browser.mjs   # that compile in Chrome, over file://, 79 s
 node test/nrfutil.mjs        # the DFU package writer, against goldens
 node test/page-nrf52.mjs     # install the Seeed core, compile blink, check the zip
 NETWORK=1 node test/live.mjs # the deployed page, in Chrome, over HTTP
@@ -761,6 +762,12 @@ node test/ide-page.mjs       # the IDE's own UI in Chrome, compiles a sketch
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
+
+`test/page-browser.mjs` is local for the same reason `test/ide-page.mjs` is: the
+runner has no Chrome. It is the one test that grades the CLI page in a browser,
+so it is the only thing that would notice if `createToolInstance()` went away —
+measured, by bypassing the helper and watching the compile fail while every Node
+test stayed green.
 
 `test/arm-tools.mjs` is not in that list because it needs `build/arm-wasm/out/`,
 which a fresh clone does not have: the tools are built by the script and
