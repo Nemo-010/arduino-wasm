@@ -307,6 +307,8 @@ def main():
                     help="the bundle from scripts/build-ide-services.py")
     ap.add_argument("--no-publish", action="store_true",
                     help="leave web/ide alone (for a build that is only measured)")
+    ap.add_argument("--publish-only", action="store_true",
+                    help="collect and publish from the tree left by --no-publish, without rebuilding it")
     args = ap.parse_args()
 
     src, out = Path(args.src).resolve(), Path(args.out).resolve()
@@ -316,6 +318,24 @@ def main():
     env["PATH"] = str(src / "node_modules/.bin") + ":" + env["PATH"]
     ext, app = src / "arduino-ide-extension", src / "electron-app"
     print("arduino-ide %s -> %s" % (args.tag, out))
+
+    if args.publish_only:
+        # CI builds the frontend once, then builds the services bundle, then
+        # publishes. Running the whole script a second time to publish rebuilt
+        # the app and hit ENOTEMPTY in theia's native-webpack-plugin cleanup.
+        # collect() still runs: publishing a tree nobody collected hides a
+        # broken build. The named artefacts are checked before anything moves.
+        if not app.is_dir():
+            die("--publish-only needs the clone built by --no-publish: %s" % src)
+        built = app / "lib/frontend/bundle.js"
+        if not built.is_file():
+            die("%s is missing; build it with python3 scripts/build-ide.py --no-publish --reuse" % built)
+        bundle = Path(args.services_bundle).resolve()
+        if not bundle.is_file():
+            die("%s is missing; build it with python3 scripts/build-ide-services.py" % bundle)
+        collect(app, out, args.tag, node_dir / "node")
+        publish(out, bundle)
+        return 0
 
     if args.reuse:
         if not app.is_dir():

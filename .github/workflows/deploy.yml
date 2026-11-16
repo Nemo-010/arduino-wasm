@@ -139,7 +139,7 @@ jobs:
 
       - name: Publish the IDE page into web/
         if: github.event_name != 'pull_request'
-        run: python3 scripts/build-ide.py --reuse
+        run: python3 scripts/build-ide.py --reuse --publish-only
 
       # Both browser tests grade the tree that gets deployed, over `file://`,
       # because this runner cannot serve it. They were local-only until the IDE

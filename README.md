@@ -458,6 +458,14 @@ with an optional `tag` input, and weekly on a schedule, so a new upstream
 release is picked up without anyone running anything. The tests are the gate: a
 release that breaks the page fails the run and does not get deployed.
 
+The IDE is built once per run. `--no-publish --reuse` clones (or reuses),
+builds and collects; `build-ide-services.py` bundles the real services; then
+`--reuse --publish-only` collects and publishes from that tree. The last step
+must not call `build_app()` again: a second `theia build` failed in CI with
+`ENOTEMPTY` on `lib/backend/native-webpack-plugin`. `--publish-only` checks the
+built frontend by name and refuses if it is missing, and it never skips
+`collect()`, so a publish cannot hide a stale collected tree.
+
 The site is at <https://nemo-010.github.io/arduino-wasm/>. Pages is enabled for
 the repository with the source set to GitHub Actions; a fork has to do that
 once, in Settings → Pages.
@@ -757,11 +765,10 @@ and that the compile ends with the CLI's own section sizes — measured
 `text 2044 of 32256`, `data 197 of 2048`.
 
 Measured 2026-11-16 on 12 cores: 166 s end to end, starting from an empty Chrome
-profile. It is not in CI and cannot be: it needs a built IDE tree
-(`python3 scripts/build-ide.py` and `python3 scripts/build-ide-services.py`) and
-a browser. It exits 2 with that command printed when the tree is missing, and it
-writes `build/ide-page.png`. See the tests section for the rest of the local-only
-commands.
+profile. CI builds the IDE tree just before it runs this test, so it runs there
+too; locally it needs `python3 scripts/build-ide.py` and
+`python3 scripts/build-ide-services.py` first. It exits 2 with those commands
+printed when the tree is missing, and it writes `build/ide-page.png`.
 
 Still stubbed, and named as such: the serial monitor (a Proxy that throws by
 name), the plugin host, and the debug adapter, because a browser has no backend
