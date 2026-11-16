@@ -285,14 +285,15 @@ def collect(app, out, tag, node):
     return manifest
 
 
-# The page's script tags: WasmExec installs `globalThis.Go`, ide-boot starts the
-# CLI, services.js installs `ArduinoIdeServices`, and only then does Theia's own
-# bundle run and find a backend.
+# The page's script tags: WasmExec installs `globalThis.Go`, then ide-boot
+# starts the CLI and loads services.js and Theia's bundle after the process shim
+# exists. Leaving those two as classic tags made the live page race its own
+# boot: over HTTP they ran before the shim was installed and died reading
+# process.env at module load.
 PAGE_SCRIPTS = (
-    "    <!-- the wasm CLI, then the services that speak to it, then the IDE -->\n"
+    "    <!-- the wasm CLI, then the boot that loads the services and the IDE -->\n"
     "    <script src=\"../wasm_exec.js\"></script>\n"
     "    <script src=\"ide-boot.js\"></script>\n"
-    "    <script src=\"services.js\"></script>\n"
 )
 PAGE_BUNDLE_TAG = '<script type="text/javascript" src="./bundle.js" charset="utf-8"></script>'
 
@@ -330,7 +331,7 @@ def publish(out, services_bundle, frontend=None):
         die("%s: expected 1 bundle script tag, found %d" % (index, count))
     if "ide-boot.js" in text:
         die("%s already carries the page scripts" % index)
-    index.write_text(text.replace(PAGE_BUNDLE_TAG, PAGE_SCRIPTS + "    " + PAGE_BUNDLE_TAG))
+    index.write_text(text.replace(PAGE_BUNDLE_TAG, PAGE_SCRIPTS))
 
     size = sum(p.stat().st_size for p in dst.rglob("*") if p.is_file())
     print("published: %s (%d bytes, %d bytes of maps and precompressed copies left out)"

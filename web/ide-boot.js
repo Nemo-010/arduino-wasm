@@ -15,6 +15,22 @@
 
 (function () {
   const root = new URL('../', document.baseURI);
+  const here = new URL('./', document.baseURI);
+  // The service bundle and Theia's own bundle read process.env while their
+  // modules are being defined. The nodefs shim that provides it is installed
+  // by startPageCLI, whose imports are asynchronous over HTTP. Loading those
+  // bundles as classic script tags raced that chain: on file:// the imports
+  // won, on Pages they did not, and services.js died on
+  // "Cannot read properties of undefined (reading 'NODE_DEBUG')" before it
+  // could install a single service. They are loaded here, in order, only once
+  // the shim is in place.
+  const loadScript = (src) => new Promise((resolve, reject) => {
+    const tag = document.createElement('script');
+    tag.src = src;
+    tag.onload = () => resolve();
+    tag.onerror = () => reject(new Error('failed to load ' + src));
+    document.head.appendChild(tag);
+  });
   const logs = [];
   const log = text => {
     // The console page prints these; the IDE page has no log panel of its own,
@@ -76,6 +92,8 @@
       },
     });
     globalThis.arduinoCLI = cli;
+    await loadScript(new URL('services.js', here).href);
+    await loadScript(new URL('bundle.js', here).href);
     return cli;
   })();
 

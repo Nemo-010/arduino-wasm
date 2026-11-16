@@ -767,11 +767,23 @@ Monaco displays the sketch's source, that the bundle is the real one
 and that the compile ends with the CLI's own section sizes — measured
 `text 2044 of 32256`, `data 197 of 2048`.
 
-Measured 2026-11-16 on 12 cores: 166 s end to end, starting from an empty Chrome
+Measured 2026-11-16 on 12 cores: 165 s end to end, starting from an empty Chrome
 profile. CI builds the IDE tree just before it runs this test, so it runs there
 too; locally it needs `python3 scripts/build-ide.py` and
 `python3 scripts/build-ide-services.py` first. It exits 2 with those commands
-printed when the tree is missing, and it writes `build/ide-page.png`.
+printed when the tree is missing, and it writes `build/ide-page.png`. The same
+test grades the deployed page with
+`NETWORK=1 node test/ide-page.mjs https://nemo-010.github.io/arduino-wasm/ide/`,
+writing `build/ide-live.png` instead.
+
+The published page loads `wasm_exec.js` and `ide-boot.js` and nothing else:
+`ide-boot.js` waits for the CLI and then injects `services.js` followed by
+Theia's `bundle.js`. Both bundles read `process.env` while their modules are
+being defined, and the nodefs shim that provides it is installed by an async
+import chain. As classic script tags they raced that chain: `file://` was fast
+enough, but on Pages they ran first and died on
+`Cannot read properties of undefined (reading 'NODE_DEBUG')`, leaving a shell
+with no services. The live command above is what caught it.
 
 Still stubbed, and named as such: the serial monitor (a Proxy that throws by
 name), the plugin host, and the debug adapter, because a browser has no backend
@@ -833,11 +845,13 @@ NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
 
-`test/page-browser.mjs` is local for the same reason `test/ide-page.mjs` is: the
-runner has no Chrome. It is the one test that grades the CLI page in a browser,
-so it is the only thing that would notice if `createToolInstance()` went away —
-measured, by bypassing the helper and watching the compile fail while every Node
-test stayed green.
+`test/page-browser.mjs` and `test/ide-page.mjs` both run in CI: the workflow
+finds the runner's Chrome and hands both tests its path. The first is the one
+that grades the CLI page in a browser, so it is the only thing that would notice
+if `createToolInstance()` went away — measured, by bypassing the helper and
+watching the compile fail while every Node test stayed green. Both also run
+locally; the runner's Chrome is not the one a developer uses, so their versions
+are printed in the test output.
 
 `test/arm-tools.mjs` is not in that list because it needs `build/arm-wasm/out/`,
 which a fresh clone does not have: the tools are built by the script and

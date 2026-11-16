@@ -8,10 +8,13 @@
 // a new sketch, and compiles it. The assertion is the compile summary's own
 // section sizes.
 //
-// It cannot run in CI: it needs a built IDE tree (`python3 scripts/build-ide.py`)
-// and a browser. Measured here: 135 s end to end on 12 cores.
+// CI builds the tree just before it runs this test. Locally it needs a built
+// IDE tree (`python3 scripts/build-ide.py`) and a browser. Measured here:
+// 135 s end to end on 12 cores.
 //
-// Run: node test/ide-page.mjs
+// Run: node test/ide-page.mjs [url]
+// With a URL it grades that deployed page instead, over HTTP; NETWORK=1 is
+// required so a network run is never accidental.
 // Exit: 0 pass, 1 a check failed, 2 a precondition is missing.
 
 import { existsSync, rmSync } from "node:fs";
@@ -19,12 +22,18 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const page = join(root, "web", "ide", "index.html");
-if (!existsSync(page)) {
+const liveUrl = process.argv[2] || "";
+if (liveUrl && process.env.NETWORK !== "1") {
+  console.log("skipped: NETWORK=1 is required to grade a live URL");
+  process.exit(2);
+}
+const page = liveUrl || join(root, "web", "ide", "index.html");
+if (!liveUrl && !existsSync(page)) {
   console.log("missing: " + page);
   console.log("build it first: python3 scripts/build-ide.py && python3 scripts/build-ide-services.py");
   process.exit(2);
 }
+const shot = join(root, "build", liveUrl ? "ide-live.png" : "ide-page.png");
 
 const { launch } = await import(pathToFileURL(join(root, "test", "cdp.mjs")).href);
 
@@ -106,10 +115,10 @@ const read = `JSON.stringify({
 let result = null;
 try {
   result = await launch({
-    url: pathToFileURL(page).href,
+    url: liveUrl || pathToFileURL(page).href,
     waitMs: 40000,
     profile,
-    shot: join(root, "build", "ide-page.png"),
+    shot,
     preScript: `try { localStorage.setItem('arduino.index.library', ${JSON.stringify(LIBRARY_INDEX)}); } catch (e) {}`,
     steps: [
       { wait: 45000, evaluate: dom },
