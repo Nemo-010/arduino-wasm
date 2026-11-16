@@ -88,7 +88,15 @@ class Pipe {
   }
 }
 
-export async function launch({ url, waitMs = 20000, shot, evaluate, steps = [], profile = '/workspace/.scratch/chrome-profile-ide' }) {
+export async function launch({
+  url,
+  waitMs = 20000,
+  shot,
+  evaluate,
+  steps = [],
+  profile = '/workspace/.scratch/chrome-profile-ide',
+  preScript,
+}) {
   mkdirSync(profile, { recursive: true });
   const child = spawn(
     CHROME,
@@ -174,6 +182,12 @@ export async function launch({ url, waitMs = 20000, shot, evaluate, steps = [], 
   // the previous deploy. GitHub Pages allows a ten-minute cache, which is right
   // for a reader and wrong for a driver.
   await commands.send('Network.setCacheDisabled', { cacheDisabled: true }, sessionId);
+  // Code the caller needs to run before the page's own scripts: the IDE page
+  // reads its index configuration from localStorage, and a test that set it
+  // afterwards would grade the URL the previous run left behind.
+  if (preScript) {
+    await commands.send('Page.addScriptToEvaluateOnNewDocument', { source: preScript }, sessionId);
+  }
   // Trap errors raised before the page's own code can report them.
   await commands.send(
     'Page.addScriptToEvaluateOnNewDocument',

@@ -238,6 +238,49 @@ def collect(app, out, tag, node):
     return manifest
 
 
+# The page's script tags: WasmExec installs `globalThis.Go`, ide-boot starts the
+# CLI, services.js installs `ArduinoIdeServices`, and only then does Theia's own
+# bundle run and find a backend.
+PAGE_SCRIPTS = (
+    "    <!-- the wasm CLI, then the services that speak to it, then the IDE -->\n"
+    "    <script src=\"../wasm_exec.js\"></script>\n"
+    "    <script src=\"ide-boot.js\"></script>\n"
+    "    <script src=\"services.js\"></script>\n"
+)
+PAGE_BUNDLE_TAG = '<script type="text/javascript" src="./bundle.js" charset="utf-8"></script>'
+
+
+def publish(out, services_bundle, frontend=None):
+    """Copy the built IDE into the served tree and wire its page.
+
+    `web/` is what the deploy uploads, so the IDE page has to live under it to be
+    reachable at all. Its own assets are relative to `web/ide/`, while the wasm,
+    the toolchains and the package indexes are the site's, one level up -- which
+    is why this is a copy rather than a second build.
+    """
+    dst = ROOT / "web/ide"
+    if dst.exists():
+        shutil.rmtree(dst)
+    # `frontend` lets a rebundled tree be republished without collecting it
+    # into `out` first; the collected copy and the live one are the same files.
+    shutil.copytree(Path(frontend) if frontend else out / "frontend", dst)
+    shutil.copy2(services_bundle, dst / "services.js")
+    shutil.copy2(ROOT / "web/ide-boot.js", dst / "ide-boot.js")
+
+    index = dst / "index.html"
+    text = index.read_text()
+    count = text.count(PAGE_BUNDLE_TAG)
+    if count != 1:
+        die("%s: expected 1 bundle script tag, found %d" % (index, count))
+    if "ide-boot.js" in text:
+        die("%s already carries the page scripts" % index)
+    index.write_text(text.replace(PAGE_BUNDLE_TAG, PAGE_SCRIPTS + "    " + PAGE_BUNDLE_TAG))
+
+    size = sum(p.stat().st_size for p in dst.rglob("*") if p.is_file())
+    print("published: %s (%d bytes)" % (dst.relative_to(ROOT), size))
+    return dst
+
+
 def main():
     ap = argparse.ArgumentParser(description="build arduino-ide for the browser")
     ap.add_argument("--tag", default=DEFAULT_TAG)
@@ -245,6 +288,10 @@ def main():
     ap.add_argument("--out", default=str(BUILD / "ide-dist"))
     ap.add_argument("--reuse", action="store_true")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--services-bundle", default=str(BUILD / "ide-services/services.js"),
+                    help="the bundle from scripts/build-ide-services.py")
+    ap.add_argument("--no-publish", action="store_true",
+                    help="leave web/ide alone (for a build that is only measured)")
     args = ap.parse_args()
 
     src, out = Path(args.src).resolve(), Path(args.out).resolve()
@@ -268,6 +315,13 @@ def main():
     build_natives(src, env, args.force)
     build_app(app, env)
     collect(app, out, args.tag, node_dir / "node")
+    if args.no_publish:
+        print("  => web/ide left alone (--no-publish)")
+    else:
+        bundle = Path(args.services_bundle).resolve()
+        if not bundle.is_file():
+            die("%s is missing; build it with python3 scripts/build-ide-services.py" % bundle)
+        publish(out, bundle)
     return 0
 
 

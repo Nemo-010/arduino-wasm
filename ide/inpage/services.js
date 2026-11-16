@@ -8,7 +8,7 @@
 // fabricates sketches. Both are placeholders for the wasm CLI + IndexedDB
 // storage, and are marked TODO below.
 
-const FileType = { File: 1, Directory: 2 };
+const { SharedFiles, FileType } = require('./shared-files');
 
 // FileReadWrite | FileFolderCopy | PathCaseSensitive
 const CAPABILITIES = 2 | 8 | 1024;
@@ -131,7 +131,16 @@ class MemoryFiles {
 }
 
 function createServices({ log }) {
-  const files = new MemoryFiles();
+  // The IDE's file RPC and the wasm CLI must read one tree. `globalThis.fs` is
+  // the page's Node-shaped filesystem (web/nodefs.js), the same instance the Go
+  // side calls, so an editor save is a file the compiler sees. Without it --
+  // a Node test that has not built the shim -- `MemoryFiles` keeps the boot
+  // working, and `window.__inpageFiles` says which one answered.
+  const shared = typeof globalThis !== 'undefined' && globalThis.fs && typeof globalThis.fs.statSync === 'function';
+  const files = shared ? new SharedFiles(globalThis.fs) : new MemoryFiles();
+  if (typeof window !== 'undefined') {
+    window.__inpageFiles = shared ? 'shared' : 'memory';
+  }
   const entries = new Map();
   const calls = [];
   let sketchCounter = 0;
@@ -206,37 +215,12 @@ function createServices({ log }) {
     access: resource => files.stat(fsPathOf(resource)),
     fsPath: resource => fsPathOf(resource),
     readdir: resource => files.readdir(fsPathOf(resource)),
-    readFile: resource => {
-      const node = files.nodes.get(fsPathOf(resource));
-      if (!node) {
-        throw notFound(resource);
-      }
-      return node.content || new Uint8Array(0);
-    },
+    readFile: resource => files.readFile(fsPathOf(resource)),
     writeFile: (resource, content) => files.writeFile(fsPathOf(resource), content),
     mkdir: resource => files.mkdir(fsPathOf(resource)),
     delete: resource => files.delete(fsPathOf(resource)),
-    rename: (source, target) => {
-      const from = fsPathOf(source);
-      const to = fsPathOf(target);
-      const node = files.nodes.get(from);
-      if (!node) {
-        throw notFound(source);
-      }
-      const moved = [...files.nodes.entries()].filter(([key]) => key === from || key.startsWith(from + '/'));
-      for (const [key, value] of moved) {
-        files.nodes.delete(key);
-        files.nodes.set(to + key.slice(from.length), value);
-      }
-    },
-    copy: (source, target) => {
-      const from = fsPathOf(source);
-      const to = fsPathOf(target);
-      const copied = [...files.nodes.entries()].filter(([key]) => key === from || key.startsWith(from + '/'));
-      for (const [key, value] of copied) {
-        files.nodes.set(to + key.slice(from.length), { ...value });
-      }
-    },
+    rename: (source, target) => files.rename(fsPathOf(source), fsPathOf(target)),
+    copy: (source, target) => files.copy(fsPathOf(source), fsPathOf(target)),
     watch: () => {
       watchCounter += 1;
       return undefined;
@@ -248,11 +232,10 @@ function createServices({ log }) {
   const sketchFolder = sketch => {
     const folder = fsPathOf(sketch.uri);
     const main = fsPathOf(sketch.mainFileUri);
-    if (files.nodes.has(folder) && files.nodes.get(folder).type === FileType.Directory) {
-      return sketch;
-    }
     files.mkdirp(folder);
-    if (!files.nodes.has(main)) {
+    try {
+      files.stat(main);
+    } catch {
       files.writeFile(main, new TextEncoder().encode(defaultInoContent()));
     }
     return sketch;

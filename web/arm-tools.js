@@ -8,6 +8,8 @@
 // One instance per call, not one per tool: a tool's own filesystem is where the
 // arguments point, and a linker run must not see a previous run's leftovers.
 
+import { createToolInstance } from "./tool-common.js";
+
 function mkdirp(FS, path) {
   const parent = path.slice(0, path.lastIndexOf("/"));
   if (parent && !FS.analyzePath(parent).exists) FS.mkdirTree(parent);
@@ -40,7 +42,7 @@ export function createArmTools({ importModule, readWasm, note }) {
     const wasmBinary = await readWasm(name + ".wasm");
     let stdout = "";
     let stderr = "";
-    const instance = await create({
+    const instance = await createToolInstance(create, {
       wasmBinary,
       noInitialRun: true,
       noExitRuntime: true,

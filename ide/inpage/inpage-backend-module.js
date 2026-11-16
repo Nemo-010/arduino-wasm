@@ -76,31 +76,151 @@ function logToConsole(level, name, message, params) {
   window.__backendLog.push({ level, name, text, params: Array.isArray(params) ? params : [] });
 }
 
-/** The object the RPC layer calls into for one service path. */
-function createTargets() {
-  const services = createServices({ log: logToConsole });
+// Paths answered by arduino-ide's own service implementations, which arrive in
+// `ArduinoIdeServices` -- the bundle of the extension's backend classes talking
+// to the wasm CLI. Everything else keeps the stub: where a browser has no such
+// backend at all (no plugin host, no debug adapter), the stub's empty answer is
+// the true one rather than a placeholder.
+//
+// `sketches-service` is deliberately absent for now: `SketchesServiceImpl` needs
+// a workspace service and reads the sketchbook through Theia's filesystem, and
+// the page's file RPC already places sketches on the one tree the CLI reads.
+const REAL_PATHS = new Set([
+  '/services/boards-service',
+  '/services/library-service',
+  '/services/core-service',
+  '/services/config-service',
+  '/services/arduino-daemon',
+  '/services/remote-filesystem',
+  '/services/sketches-service',
+]);
 
+const realServices = {
+  // Resolves to a Map of path -> implementation, empty when the bundle is not on
+  // the page. Never rejects: a missing bundle must leave the stubs answering.
+  promise: Promise.resolve(new Map()),
+  error: undefined,
+  map: new Map(),
+};
+
+/** The page's hooks for the real services: where their output and notifications go. */
+function pageHooks() {
+  const output = [];
+  const notifications = [];
+  if (typeof window !== 'undefined') {
+    window.__inpageOutput = output;
+    window.__inpageNotifications = notifications;
+  }
+  return {
+    output,
+    notifications,
+    log: (level, message) => logToConsole(level, 'ide-services', message, []),
+    notify: (name, ...args) => {
+      notifications.push({ name, args });
+    },
+    appendToOutput: message => {
+      // ResponseService.appendToOutput sends `{ chunk }`, not a string, so a
+      // sink that only accepted strings recorded `[object Object]` once per
+      // compiler line.
+      if (typeof message === 'string') output.push(message);
+      else if (message && typeof message.chunk === 'string') output.push(message.chunk);
+      else output.push(String(message));
+    },
+  };
+}
+
+function bootRealServices(services) {
+  const bundle = typeof globalThis !== 'undefined' ? globalThis.ArduinoIdeServices : undefined;
+  if (!bundle || typeof bundle.createIdeServices !== 'function') {
+    // The page was built without the bundle: the stubs answer, and this says so
+    // once instead of looking like a backend that lost half its methods.
+    if (typeof window !== 'undefined') {
+      window.__inpageReal = 'missing';
+    }
+    return realServices.promise;
+  }
+
+  const hooks = pageHooks();
+  // The CLI has to be running before a service asks it anything. The page's own
+  // boot script (web/ide-boot.js) publishes that promise; when it is absent --
+  // the Node test drives the bundle directly -- this resolves at once.
+  const cliReady = globalThis.__arduinoCLIReady;
+  const started = cliReady && typeof cliReady.then === 'function' ? cliReady : Promise.resolve();
+  realServices.promise = started
+    .then(() => bundle.createIdeServices(hooks))
+    .then(({ container }) => {
+      realServices.map = new Map([
+        ['/services/boards-service', container.boardsService],
+        ['/services/library-service', container.libraryService],
+        ['/services/core-service', container.coreService],
+        ['/services/config-service', container.configService],
+        ['/services/arduino-daemon', container.daemon],
+        ['/services/remote-filesystem', container.fileSystemService],
+        ['/services/sketches-service', container.sketchesService],
+      ]);
+      if (typeof window !== 'undefined') {
+        window.__inpageReal = 'bundled';
+        window.__inpageRealServices = Object.fromEntries(realServices.map.keys().map(key => [key, true]));
+      }
+      return realServices.map;
+    })
+    .catch(error => {
+      realServices.error = String((error && error.stack) || error);
+      // A real service that fails to boot must not take the page with it: the
+      // stubs still answer, and the failure is readable by name.
+      if (typeof window !== 'undefined') {
+        window.__inpageReal = 'failed';
+        window.__inpageRealError = realServices.error;
+      }
+      return realServices.map;
+    });
+  return realServices.promise;
+}
+
+/** The object the RPC layer calls into for one service path. */
+function createTargets(services) {
   return path => {
     const impl = services.get(path) || Object.create(null);
     if (typeof window !== 'undefined') {
       window.__inpageServices[path] = impl;
     }
-    return new Proxy(Object.create(null), {
+    const target = new Proxy(Object.create(null), {
       get(_target, name) {
         if (typeof name !== 'string' || name === 'then' || name === 'toJSON') {
           return undefined;
         }
         return (...args) => {
           record(calls, { path, method: name, argc: args.length });
-          const fn = impl[name];
-          if (typeof fn !== 'function') {
-            record(missing, { path, method: name, argc: args.length, args: args.map(summarize) });
-            return undefined;
+          const stub = impl[name];
+          const callStub = () => {
+            if (typeof stub !== 'function') {
+              record(missing, { path, method: name, argc: args.length, args: args.map(summarize) });
+              return undefined;
+            }
+            return stub(...args);
+          };
+          if (!REAL_PATHS.has(path)) {
+            return callStub();
           }
-          return fn(...args);
+          // The real implementation wins where it has the method; the stub fills
+          // the rest, and the fall-through is recorded so it stays visible.
+          return realServices.promise.then(map => {
+            const real = map.get(path);
+            if (real && typeof real[name] === 'function') {
+              record(calls, { path, method: name, via: 'real' });
+              return real[name](...args);
+            }
+            return callStub();
+          });
         };
       },
     });
+    // The page test drives the same object the frontend's RPC does, so a call
+    // that reached a real service is recorded with via:'real' either way.
+    if (typeof window !== 'undefined') {
+      window.__inpageTargets[path] = target;
+    }
+    return target;
   };
 }
 
@@ -125,6 +245,7 @@ function install(container) {
     window.__inpageMissing = missing;
     window.__inpageCounters = counters;
     window.__inpageServices = Object.create(null);
+    window.__inpageTargets = Object.create(null);
     window.__inpageInstalled = true;
   }
 
@@ -158,7 +279,12 @@ function install(container) {
     container.bind(ElectronWebSocketConnectionSource).to(OfflineSocketSource).inSingletonScope();
   }
 
-  source.open(server => attachServer(server, createTargets()));
+  const services = createServices({ log: logToConsole });
+  // Booting the real services is asynchronous -- it starts the wasm CLI -- and
+  // `install()` is called while the container loads, so the promise is kept and
+  // consulted per call instead of awaited here.
+  bootRealServices(services);
+  source.open(server => attachServer(server, createTargets(services)));
 }
 
 class OfflineSocketSource extends ElectronWebSocketConnectionSource {

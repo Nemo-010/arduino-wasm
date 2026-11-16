@@ -26,9 +26,45 @@ const O_TRUNC = 0x200;
 const O_APPEND = 0x400;
 const O_DIRECTORY = 0x10000;
 
-export function fsError(code, path) {
+// Node's fs errors carry a numeric `errno` beside the string `code`, and code
+// written against Node checks both: the IDE's `ErrnoException.is()` requires
+// `code` to be a string *and* `errno` to be a number before it will look at
+// either. An error with only `code` is therefore not an ENOENT to that code,
+// which is how a missing config file became a silent hang instead of a create.
+//
+// These are the values libuv reports on Linux, which is what Node prints.
+export const ERRNO = {
+  EPERM: -1,
+  ENOENT: -2,
+  EIO: -5,
+  EBADF: -9,
+  EACCES: -13,
+  EBUSY: -16,
+  EEXIST: -17,
+  EXDEV: -18,
+  ENOTDIR: -20,
+  EISDIR: -21,
+  EINVAL: -22,
+  EMFILE: -24,
+  ENOSPC: -28,
+  EROFS: -30,
+  EPIPE: -32,
+  ENAMETOOLONG: -36,
+  ENOSYS: -38,
+  ENOTEMPTY: -39,
+  ELOOP: -40,
+  ETIMEDOUT: -110,
+};
+
+export function fsError(code, path, syscall) {
   const error = new Error(code + (path ? ": " + path : ""));
   error.code = code;
+  // A code outside the table would report the wrong number, so it is a defect
+  // in this file rather than in the caller; `test/run.mjs` checks every code
+  // used here is in the table.
+  error.errno = Object.prototype.hasOwnProperty.call(ERRNO, code) ? ERRNO[code] : -1;
+  if (syscall) error.syscall = syscall;
+  if (path) error.path = path;
   return error;
 }
 
@@ -136,6 +172,119 @@ class MemoryBackend {
   }
   async clear() {
     this.records.clear();
+  }
+
+  // The synchronous view. The IDE's Node modules call `fs.readFileSync` and
+  // friends, so the page's filesystem has to answer without awaiting -- which
+  // means the working set has to be in memory. It already is.
+  getSync(path) {
+    return this.records.get(path) || null;
+  }
+  putSync(path, record) {
+    this.records.set(path, record);
+  }
+  delSync(path) {
+    this.records.delete(path);
+  }
+  childrenSync(path) {
+    const prefix = path === "/" ? "/" : path + "/";
+    const names = [];
+    for (const key of this.records.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      if (rest && !rest.includes("/")) names.push(rest);
+    }
+    return names;
+  }
+  keysSync() {
+    return [...this.records.keys()];
+  }
+}
+
+// Keeps the whole tree in memory and writes each change through to a slower
+// backend, so `fs.*Sync` has something to read. IndexedDB is asynchronous by
+// nature; a synchronous API over it is only possible against a hydrated copy,
+// and a hydrated copy is what the page needs anyway for its size.
+class CachedBackend {
+  constructor(inner) {
+    this.inner = inner;
+    this.records = new Map();
+    this.pending = Promise.resolve();
+  }
+
+  async hydrate() {
+    for (const key of await this.inner.keys()) {
+      this.records.set(key, await this.inner.get(key));
+    }
+    return this.records.size;
+  }
+
+  // Reads answer from the mirror: it is the same data, and a read waiting on a
+  // disk that has already been read is time spent for nothing.
+  async get(path) {
+    return this.getSync(path);
+  }
+  async children(path) {
+    return this.childrenSync(path);
+  }
+  async keys() {
+    return this.keysSync();
+  }
+  async put(path, record) {
+    this.putSync(path, record);
+    this.pending = this.pending.then(() => this.inner.put(path, record)).catch(() => undefined);
+    return this.pending;
+  }
+  async del(path) {
+    this.delSync(path);
+    this.pending = this.pending.then(() => this.inner.del(path)).catch(() => undefined);
+    return this.pending;
+  }
+
+  getSync(path) {
+    if (path === "/") return { kind: "dir", mode: 0o755, mtime: 0 };
+    return this.records.get(path) || null;
+  }
+  putSync(path, record) {
+    this.records.set(path, record);
+  }
+  delSync(path) {
+    this.records.delete(path);
+  }
+  childrenSync(path) {
+    const prefix = path === "/" ? "/" : path + "/";
+    const names = [];
+    for (const key of this.records.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      if (rest && !rest.includes("/")) names.push(rest);
+    }
+    return names;
+  }
+  keysSync() {
+    return [...this.records.keys()];
+  }
+
+  async movePrefix(from, to) {
+    const prefix = from + "/";
+    const moves = [];
+    for (const [key, record] of this.records) {
+      if (key.startsWith(prefix)) moves.push([key, to + key.slice(from.length), record]);
+    }
+    for (const [key] of moves) this.records.delete(key);
+    for (const [, key, record] of moves) this.records.set(key, record);
+    this.pending = this.pending.then(() => this.inner.movePrefix(from, to)).catch(() => undefined);
+    return this.pending;
+  }
+
+  async clear() {
+    this.records.clear();
+    this.pending = this.pending.then(() => this.inner.clear()).catch(() => undefined);
+    return this.pending;
+  }
+
+  async flush() {
+    return this.pending;
   }
 }
 
@@ -252,7 +401,12 @@ export async function deleteDatabase(name = "arduino-wasm") {
 }
 
 export function createNodeFS(options = {}) {
-  const backend = options.backend || new MemoryBackend();
+  // A synchronous `fs` needs a synchronous view of the tree. IndexedDB cannot
+  // answer without awaiting, so it is wrapped in a backend that keeps the tree
+  // in memory and writes each change through. The working set is the same data;
+  // the wrapper only decides who waits.
+  let backend = options.backend || new MemoryBackend();
+  if (typeof backend.getSync !== "function") backend = new CachedBackend(backend);
   const stdout = options.stdout || ((text) => console.log(text));
   const stderr = options.stderr || ((text) => console.error(text));
   const cwd = { value: options.cwd || "/" };
@@ -297,6 +451,201 @@ export function createNodeFS(options = {}) {
     const entry = await entryAt(resolved);
     if (!entry) throw fsError("ENOENT", path);
     return [resolved, entry];
+  }
+
+
+  // The synchronous mirror of the two helpers above. Every sync call goes
+  // through these, so a symlink means the same thing whether the caller awaited.
+  function entryAtSync(path) {
+    if (path === "/") return { kind: "dir", mode: 0o755, mtime: 0 };
+    return backend.getSync(path);
+  }
+
+  function resolveSync(path, followLast = true, allowMissing = false, depth = 0) {
+    if (depth > 32) throw fsError("ELOOP", path);
+    let current = "/";
+    const parts = normalize(path, cwd.value).split("/").filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+      const next = current === "/" ? "/" + parts[i] : current + "/" + parts[i];
+      const entry = entryAtSync(next);
+      const isLast = i === parts.length - 1;
+      if (!entry) {
+        if (isLast && allowMissing) return next;
+        throw fsError("ENOENT", path);
+      }
+      if (entry.kind === "link" && (!isLast || followLast)) {
+        const target = joinPath(dirname(next), entry.target);
+        const rest = parts.slice(i + 1).join("/");
+        return resolveSync(rest ? target + "/" + rest : target, followLast, allowMissing, depth + 1);
+      }
+      if (!isLast && entry.kind !== "dir") throw fsError("ENOTDIR", path);
+      current = next;
+    }
+    return current;
+  }
+
+  function requireEntrySync(path, followLast = true) {
+    const resolved = resolveSync(path, followLast);
+    const entry = entryAtSync(resolved);
+    if (!entry) throw fsError("ENOENT", path);
+    return [resolved, entry];
+  }
+
+  // Bytes in, bytes out. A string is UTF-8, because that is what every writer
+  // in the IDE means when it hands the filesystem a string.
+  function toBytes(data) {
+    if (typeof data === "string") return new TextEncoder().encode(data);
+    return data instanceof Uint8Array ? data : new Uint8Array(data);
+  }
+
+  function fromBytes(data) {
+    // Node callers expect a Buffer; a page has one only if the bundle installed
+    // the polyfill. Returning the bytes themselves when it has not keeps the
+    // failure at the caller's `toString("utf8")` instead of here.
+    return typeof Buffer !== "undefined" && typeof Buffer.from === "function" ? Buffer.from(data) : data;
+  }
+
+  function writeFileSyncAt(path, data, mode) {
+    const resolved = resolveSync(path, true, true);
+    const existing = entryAtSync(resolved);
+    if (existing && existing.kind === "dir") throw fsError("EISDIR", path);
+    const parent = entryAtSync(dirname(resolved));
+    if (!parent) throw fsError("ENOENT", path);
+    if (parent.kind !== "dir") throw fsError("ENOTDIR", path);
+    backend.putSync(resolved, {
+      kind: "file",
+      data: toBytes(data),
+      mode: MODE_FILE(mode !== undefined ? mode : existing ? existing.mode : undefined),
+      mtime: Date.now(),
+    });
+    return null;
+  }
+
+  async function writeFileAt(path, data, mode) {
+    const resolved = await resolve(path, true, true);
+    const existing = await entryAt(resolved);
+    if (existing && existing.kind === "dir") throw fsError("EISDIR", path);
+    const parent = await entryAt(dirname(resolved));
+    if (!parent) throw fsError("ENOENT", path);
+    if (parent.kind !== "dir") throw fsError("ENOTDIR", path);
+    await backend.put(resolved, {
+      kind: "file",
+      data: toBytes(data),
+      mode: MODE_FILE(mode !== undefined ? mode : existing ? existing.mode : undefined),
+      mtime: Date.now(),
+    });
+    return null;
+  }
+
+  function readFileSyncAt(path) {
+    const [, entry] = requireEntrySync(path);
+    if (entry.kind === "dir") throw fsError("EISDIR", path);
+    if (entry.kind !== "file") throw fsError("EINVAL", path);
+    return fromBytes(entry.data || new Uint8Array(0));
+  }
+
+  async function readFileAt(path) {
+    const [, entry] = await requireEntry(path);
+    if (entry.kind === "dir") throw fsError("EISDIR", path);
+    if (entry.kind !== "file") throw fsError("EINVAL", path);
+    return fromBytes(entry.data || new Uint8Array(0));
+  }
+
+  // `recursive` is how the IDE creates a sketch directory, a config directory
+  // and a build directory: parents first, no error if it is already there.
+  function mkdirSyncAt(path, options) {
+    const recursive = !!(options && typeof options === "object" ? options.recursive : false);
+    const mode = options && typeof options === "object" ? options.mode : options;
+    if (!recursive) {
+      const resolved = resolveSync(path, true, true);
+      if (entryAtSync(resolved)) throw fsError("EEXIST", path);
+      const parent = entryAtSync(dirname(resolved));
+      if (!parent) throw fsError("ENOENT", path);
+      if (parent.kind !== "dir") throw fsError("ENOTDIR", path);
+      backend.putSync(resolved, { kind: "dir", mode: MODE_DIR(mode), mtime: Date.now() });
+      return undefined;
+    }
+    const parts = normalize(path, cwd.value).split("/").filter(Boolean);
+    let current = "/";
+    for (const part of parts) {
+      current = current === "/" ? "/" + part : current + "/" + part;
+      const entry = entryAtSync(current);
+      if (entry) {
+        if (entry.kind !== "dir") throw fsError("ENOTDIR", path);
+        continue;
+      }
+      backend.putSync(current, { kind: "dir", mode: MODE_DIR(mode), mtime: Date.now() });
+    }
+    return undefined;
+  }
+
+  async function mkdirAt(path, options) {
+    const recursive = !!(options && typeof options === "object" ? options.recursive : false);
+    const mode = options && typeof options === "object" ? options.mode : options;
+    if (!recursive) {
+      const resolved = await resolve(path, true, true);
+      if (await entryAt(resolved)) throw fsError("EEXIST", path);
+      const parent = await entryAt(dirname(resolved));
+      if (!parent) throw fsError("ENOENT", path);
+      if (parent.kind !== "dir") throw fsError("ENOTDIR", path);
+      await backend.put(resolved, { kind: "dir", mode: MODE_DIR(mode), mtime: Date.now() });
+      return undefined;
+    }
+    const parts = normalize(path, cwd.value).split("/").filter(Boolean);
+    let current = "/";
+    for (const part of parts) {
+      current = current === "/" ? "/" + part : current + "/" + part;
+      const entry = await entryAt(current);
+      if (entry) {
+        if (entry.kind !== "dir") throw fsError("ENOTDIR", path);
+        continue;
+      }
+      await backend.put(current, { kind: "dir", mode: MODE_DIR(mode), mtime: Date.now() });
+    }
+    return undefined;
+  }
+
+  // Which names a directory holds. `withFileTypes` is what glob and the IDE's
+  // project tree ask for, and a Dirent is three fields.
+  function dirents(path, entries, withFileTypes) {
+    if (!withFileTypes) return entries.map((entry) => entry.name);
+    return entries.map((entry) => ({
+      name: entry.name,
+      parentPath: path,
+      path,
+      isFile: () => entry.kind === "file",
+      isDirectory: () => entry.kind === "dir",
+      isSymbolicLink: () => entry.kind === "link",
+      isBlockDevice: () => false,
+      isCharacterDevice: () => false,
+      isFIFO: () => false,
+      isSocket: () => false,
+    }));
+  }
+
+  function readdirSyncAt(path, options) {
+    const [resolved, entry] = requireEntrySync(path);
+    if (entry.kind !== "dir") throw fsError("ENOTDIR", path);
+    const withFileTypes = !!(options && typeof options === "object" && options.withFileTypes);
+    const names = backend.childrenSync(resolved);
+    const entries = names.map((name) => {
+      const child = resolved === "/" ? "/" + name : resolved + "/" + name;
+      return { name, kind: (entryAtSync(child) || { kind: "file" }).kind };
+    });
+    return dirents(path, entries, withFileTypes);
+  }
+
+  async function readdirAt(path, options) {
+    const [resolved, entry] = await requireEntry(path);
+    if (entry.kind !== "dir") throw fsError("ENOTDIR", path);
+    const withFileTypes = !!(options && typeof options === "object" && options.withFileTypes);
+    const names = await backend.children(resolved);
+    const entries = [];
+    for (const name of names) {
+      const child = resolved === "/" ? "/" + name : resolved + "/" + name;
+      entries.push({ name, kind: ((await entryAt(child)) || { kind: "file" }).kind });
+    }
+    return dirents(path, entries, withFileTypes);
   }
 
   function callback(cb, promise) {
@@ -365,6 +714,194 @@ export function createNodeFS(options = {}) {
 
     readSync(fd, buffer) {
       return 0;
+    },
+
+    // ---- the synchronous surface -------------------------------------------
+    //
+    // The IDE's Node modules were written against a filesystem that answers in
+    // the same tick: `fs.readFileSync` while a module loads, `fs.mkdirSync` for a
+    // build directory, `fs.realpathSync` for the temporary directory. The tree
+    // is in memory, so every one of these is a lookup.
+
+    readFileSync(path, options) {
+      const data = readFileSyncAt(path);
+      const encoding = typeof options === "string" ? options : options && options.encoding;
+      return encoding ? data.toString(encoding) : data;
+    },
+    writeFileSync(path, data, options) {
+      const mode = options && typeof options === "object" ? options.mode : undefined;
+      writeFileSyncAt(path, data, mode);
+    },
+    appendFileSync(path, data, options) {
+      let existing = new Uint8Array(0);
+      try {
+        existing = toBytes(readFileSyncAt(path));
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      const added = toBytes(data);
+      const merged = new Uint8Array(existing.length + added.length);
+      merged.set(existing, 0);
+      merged.set(added, existing.length);
+      const mode = options && typeof options === "object" ? options.mode : undefined;
+      writeFileSyncAt(path, merged, mode);
+    },
+    mkdirSync(path, options) {
+      const mode = options && typeof options === "object" ? options.mode : options;
+      return mkdirSyncAt(path, options === undefined ? undefined : { ...(typeof options === "object" ? options : {}), mode });
+    },
+    readdirSync(path, options) {
+      return readdirSyncAt(path, options);
+    },
+    statSync(path) {
+      const [, entry] = requireEntrySync(path);
+      return new Stat(entry.kind, entry.kind === "file" ? (entry.data || new Uint8Array(0)).length : 0, entry.mode, entry.mtime);
+    },
+    lstatSync(path) {
+      const [, entry] = requireEntrySync(path, false);
+      return new Stat(entry.kind, entry.kind === "file" ? (entry.data || new Uint8Array(0)).length : 0, entry.mode, entry.mtime);
+    },
+    existsSync(path) {
+      try {
+        return !!entryAtSync(resolveSync(path));
+      } catch (_error) {
+        return false;
+      }
+    },
+    realpathSync: Object.assign(
+      (path) => resolveSync(path),
+      { native: (path) => resolveSync(path) },
+    ),
+    unlinkSync(path) {
+      const [resolved, entry] = requireEntrySync(path, false);
+      if (entry.kind === "dir") throw fsError("EISDIR", path);
+      backend.delSync(resolved);
+    },
+    rmdirSync(path, options) {
+      const [resolved, entry] = requireEntrySync(path, false);
+      if (entry.kind !== "dir") throw fsError("ENOTDIR", path);
+      if (resolved === "/") throw fsError("EBUSY", path);
+      const children = backend.childrenSync(resolved);
+      if (children.length > 0) {
+        if (!(options && options.recursive)) throw fsError("ENOTEMPTY", path);
+        for (const key of backend.keysSync()) {
+          if (key === resolved || key.startsWith(resolved + "/")) backend.delSync(key);
+        }
+        return;
+      }
+      backend.delSync(resolved);
+    },
+    renameSync(from, to) {
+      const [resolvedFrom, entry] = requireEntrySync(from, false);
+      const resolvedTo = resolveSync(to, true, true);
+      backend.delSync(resolvedFrom);
+      backend.putSync(resolvedTo, entry);
+      for (const key of backend.keysSync()) {
+        if (key.startsWith(resolvedFrom + "/")) {
+          backend.putSync(resolvedTo + key.slice(resolvedFrom.length), backend.getSync(key));
+          backend.delSync(key);
+        }
+      }
+    },
+    copyFileSync(from, to) {
+      const [, entry] = requireEntrySync(from);
+      if (entry.kind === "dir") throw fsError("EISDIR", from);
+      writeFileSyncAt(to, entry.data || new Uint8Array(0), entry.mode);
+    },
+    chmodSync(path, mode) {
+      const [resolved, entry] = requireEntrySync(path, false);
+      backend.putSync(resolved, { ...entry, mode: mode & 0o7777 });
+    },
+    accessSync(path, _mode) {
+      requireEntrySync(path);
+    },
+    readlinkSync(path) {
+      const [, entry] = requireEntrySync(path, false);
+      if (entry.kind !== "link") throw fsError("EINVAL", path);
+      return entry.target;
+    },
+    symlinkSync(target, path) {
+      const resolved = resolveSync(path, true, true);
+      backend.putSync(resolved, { kind: "link", target: String(target), mode: 0o777, mtime: Date.now() });
+    },
+    truncateSync(path, length = 0) {
+      const [resolved, entry] = requireEntrySync(path);
+      if (entry.kind === "dir") throw fsError("EISDIR", path);
+      const data = new Uint8Array(length);
+      data.set((entry.data || new Uint8Array(0)).subarray(0, length));
+      backend.putSync(resolved, { ...entry, data, mtime: Date.now() });
+    },
+    utimesSync(path, atime, mtime) {
+      const [resolved, entry] = requireEntrySync(path);
+      const when = mtime instanceof Date ? mtime.getTime() : Date.now();
+      backend.putSync(resolved, { ...entry, mtime: when });
+    },
+
+    // ---- the callback surface the IDE also uses ----------------------------
+
+    // Node's `fs.realpath` carries a `.native` twin, and callers reach for it
+    // by name (`node_fs_1.realpath.native`); a function without the property
+    // throws a TypeError the caller never expects.
+    realpath: Object.assign(
+      (path, cb) => {
+        callback(cb, (async () => resolve(path))());
+      },
+      {
+        native: (path, cb) => {
+          callback(cb, (async () => resolve(path))());
+        },
+      },
+    ),
+    readFile(path, options, cb) {
+      if (typeof options === "function") {
+        cb = options;
+        options = undefined;
+      }
+      callback(cb, (async () => {
+        const data = await readFileAt(path);
+        const encoding = typeof options === "string" ? options : options && options.encoding;
+        return encoding ? data.toString(encoding) : data;
+      })());
+    },
+    writeFile(path, data, options, cb) {
+      if (typeof options === "function") {
+        cb = options;
+        options = undefined;
+      }
+      const mode = options && typeof options === "object" ? options.mode : undefined;
+      callback(cb, writeFileAt(path, data, mode));
+    },
+    appendFile(path, data, options, cb) {
+      if (typeof options === "function") {
+        cb = options;
+        options = undefined;
+      }
+      const mode = options && typeof options === "object" ? options.mode : undefined;
+      callback(cb, (async () => {
+        let existing = new Uint8Array(0);
+        try {
+          existing = toBytes(await readFileAt(path));
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        const added = toBytes(data);
+        const merged = new Uint8Array(existing.length + added.length);
+        merged.set(existing, 0);
+        merged.set(added, existing.length);
+        return writeFileAt(path, merged, mode);
+      })());
+    },
+    copyFile(from, to, cb) {
+      callback(cb, (async () => {
+        const [, entry] = await requireEntry(from);
+        if (entry.kind === "dir") throw fsError("EISDIR", from);
+        return writeFileAt(to, entry.data || new Uint8Array(0), entry.mode);
+      })());
+    },
+    access(path, _mode, cb) {
+      callback(cb, (async () => {
+        await requireEntry(path);
+      })());
     },
 
     constants: {
@@ -456,16 +993,15 @@ export function createNodeFS(options = {}) {
       })());
     },
 
-    mkdir(path, mode, cb) {
-      callback(cb, (async () => {
-        const resolved = await resolve(path, true, true);
-        if (await entryAt(resolved)) throw fsError("EEXIST", path);
-        const parent = await entryAt(dirname(resolved));
-        if (!parent) throw fsError("ENOENT", path);
-        if (parent.kind !== "dir") throw fsError("ENOTDIR", path);
-        await backend.put(resolved, { kind: "dir", mode: MODE_DIR(mode), mtime: Date.now() });
-        return null;
-      })());
+    mkdir(path, options, cb) {
+      // `fs.mkdir(path, { recursive: true }, cb)` is how the IDE makes a sketch
+      // directory. Before this, the options object arrived as a numeric mode and
+      // a missing parent produced ENOENT -- a defect the extension hit at boot.
+      if (typeof options === "function") {
+        cb = options;
+        options = undefined;
+      }
+      callback(cb, mkdirAt(path, options));
     },
 
     rmdir(path, cb) {
@@ -480,12 +1016,12 @@ export function createNodeFS(options = {}) {
       })());
     },
 
-    readdir(path, cb) {
-      callback(cb, (async () => {
-        const [resolved, entry] = await requireEntry(path);
-        if (entry.kind !== "dir") throw fsError("ENOTDIR", path);
-        return backend.children(resolved);
-      })());
+    readdir(path, options, cb) {
+      if (typeof options === "function") {
+        cb = options;
+        options = undefined;
+      }
+      callback(cb, readdirAt(path, options));
     },
 
     unlink(path, cb) {
@@ -708,7 +1244,29 @@ export function createNodeFS(options = {}) {
     },
   };
 
+  // The page's environment. Go reads its own copy through `go.env`, and the
+  // modules bundled for the IDE read this one; both are filled from the same
+  // object so a variable cannot mean two things depending on who asks.
   const processAPI = {
+    env: { ...(options.env || {}) },
+    argv: ["node"],
+    platform: "linux",
+    arch: "wasm",
+    version: "v20.0.0",
+    versions: { node: "20.0.0" },
+    nextTick: (fn, ...args) => queueMicrotask(() => fn(...args)),
+    on: () => processAPI,
+    off: () => processAPI,
+    once: () => processAPI,
+    emit: () => false,
+    removeListener: () => processAPI,
+    hrtime: Object.assign((previous) => {
+      const now = typeof performance === "undefined" ? Date.now() : performance.now();
+      const seconds = Math.floor(now / 1000);
+      const nanos = Math.floor((now % 1000) * 1e6);
+      if (!previous) return [seconds, nanos];
+      return [seconds - previous[0], nanos - previous[1] < 0 ? nanos - previous[1] + 1e9 : nanos - previous[1]];
+    }, { bigint: () => BigInt(Math.floor((typeof performance === "undefined" ? Date.now() : performance.now()) * 1e6)) }),
     getuid: () => 1000,
     getgid: () => 1000,
     geteuid: () => 1000,
@@ -727,6 +1285,7 @@ export function createNodeFS(options = {}) {
   // A POSIX tree has /tmp. Go's os.TempDir() resolves to it (or to $TMPDIR),
   // and the CLI unpacks every download into a subdirectory of it.
   const ready = (async () => {
+    if (typeof backend.hydrate === "function") await backend.hydrate();
     if (!(await backend.get("/tmp"))) {
       await backend.put("/tmp", { kind: "dir", mode: 0o1777, mtime: Date.now() });
     }

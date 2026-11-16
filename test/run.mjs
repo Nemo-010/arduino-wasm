@@ -3,8 +3,10 @@
 // server. Everything after this point is arduino-cli's own code: index parsing,
 // checksum verification, zip extraction, install layout, library validation.
 
+import { readFileSync } from "node:fs";
 import { startCLI } from "./harness.mjs";
 import { fixtureFetch, FIXTURE_ORIGIN } from "./fixture-fetch.mjs";
+import { ERRNO, fsError } from "../web/nodefs.js";
 
 // startCLI replaces globalThis.process with the wasm shim, so keep the real one.
 const realProcess = process;
@@ -16,7 +18,28 @@ function check(condition, message) {
   console.log("  ok  " + message);
 }
 
+// Node's errors carry a numeric `errno`, and code written against Node checks
+// it: the IDE's `ErrnoException.is()` refuses an error whose `errno` is not a
+// number, so a shim error with only `code` reads as "some error" and the caller
+// gives up. That is not a theoretical hazard -- it turned a missing config file
+// into a hang. This check reads the codes this file actually raises, so adding
+// a code without adding its number fails here rather than at run time.
+function checkErrnoTable() {
+  const source = readFileSync(new URL("../web/nodefs.js", import.meta.url), "utf8");
+  const codes = new Set([...source.matchAll(/fsError\("([A-Z]+)"/g)].map((match) => match[1]));
+  const missing = [...codes].filter((code) => !(code in ERRNO));
+  if (missing.length > 0) {
+    throw new Error("FAILED: fsError codes with no numeric errno in ERRNO: " + missing.join(", "));
+  }
+  console.log("  ok  every fsError code has a numeric errno (" + codes.size + " codes)");
+  const sample = fsError("ENOENT", "/nope");
+  check(typeof sample.errno === "number", "a shim error carries a numeric errno");
+  check(sample.code === "ENOENT" && sample.errno === -2, "ENOENT maps to Node's -2");
+  check(sample.path === "/nope", "a shim error carries the path it failed on");
+}
+
 async function main() {
+  checkErrnoTable();
   const requests = [];
   const origin = FIXTURE_ORIGIN;
 

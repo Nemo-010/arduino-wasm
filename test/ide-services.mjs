@@ -10,13 +10,17 @@
 // Nothing here talks to a browser: if the services cannot work in Node, a bundle
 // would only be hiding the problem.
 
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { startCLI } from "./harness.mjs";
 import { fixtureFetch, FIXTURE_ORIGIN } from "./fixture-fetch.mjs";
 import { createArduinoCoreClient, CORE_SERVICE_NAME } from "../ide/inpage/cli-client.mjs";
 
 const realProcess = process;
-const extension = "/workspace/arduino-wasm/build/arduino-ide/arduino-ide-extension/lib";
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const extension = join(root, "build/arduino-ide/arduino-ide-extension/lib");
 const require = createRequire(extension + "/");
 // inversify's decorators call Reflect.hasOwnMetadata, which only exists once
 // reflect-metadata has run. The IDE's own entry points load it first.
@@ -36,8 +40,17 @@ async function main() {
   const { BoardsServiceImpl } = require("./node/boards-service-impl.js");
   const { LibraryServiceImpl } = require("./node/library-service-impl.js");
 
+  // The build that ships, not a copy in /tmp -- see the note in test/ide-client.mjs.
+  const wasm = realProcess.env.ARDUINO_WASM_BIN || join(root, "web", "arduino-cli.wasm");
+  if (!existsSync(wasm)) {
+    console.log("missing: " + wasm);
+    console.log("build it first: python3 scripts/update.py");
+    realProcess.exit(2);
+    return;
+  }
+  console.log("  wasm: " + wasm);
   const cli = await startCLI({
-    wasm: realProcess.env.ARDUINO_WASM_BIN || "/tmp/cli-test.wasm",
+    wasm,
     fetch: fixtureFetch(),
     env: {
       ARDUINO_DEFAULT_INDEX_URL: FIXTURE_ORIGIN + "/package_fixture_index.json",
@@ -50,6 +63,7 @@ async function main() {
   const client = createArduinoCoreClient({
     service: grpc[CORE_SERVICE_NAME],
     callBinary: (method, requestBase64) => cli.callBinary(method, requestBase64),
+    Metadata: require("@grpc/grpc-js").Metadata,
   });
 
   const settings = [

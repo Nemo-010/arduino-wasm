@@ -158,6 +158,100 @@ def patch_cors_gateway(src):
     log("patched internal/cli/configuration/network.go for the CORS gateway")
 
 
+def patch_js_directories(src):
+    """Give the js build the same default directories as Linux.
+
+    `getDefaultArduinoDataDir` and `getDefaultUserDir` switch on runtime.GOOS
+    and name exactly linux, darwin and windows. Under wasm GOOS is "js", which
+    matches none of them, so both fall through to `return "."` -- and a page
+    with a data directory of "." installs cores into the root of its own
+    virtual filesystem and tells the IDE the sketchbook is "/". js has a POSIX
+    filesystem and HOME, so it takes the linux branch.
+    """
+    path = os.path.join(src, "internal/cli/configuration/configuration.go")
+    with open(path) as handle:
+        text = handle.read()
+    if 'case "linux", "js":' in text:
+        return
+    replacements = [
+        (
+            '\tcase "linux":\n\t\treturn filepath.Join(userHomeDir, ".arduino15")',
+            '\tcase "linux", "js":\n\t\treturn filepath.Join(userHomeDir, ".arduino15")',
+        ),
+        (
+            '\tcase "linux":\n\t\treturn filepath.Join(userHomeDir, "Arduino")',
+            '\tcase "linux", "js":\n\t\treturn filepath.Join(userHomeDir, "Arduino")',
+        ),
+    ]
+    for old, wanted in replacements:
+        if text.count(old) != 1:
+            sys.exit(
+                "internal/cli/configuration/configuration.go changed upstream; "
+                "expected exactly one occurrence of: " + repr(old)
+            )
+        text = text.replace(old, wanted)
+    with open(path, "w") as handle:
+        handle.write(text)
+    log("patched default directories for js")
+
+
+def patch_discovery_loading(src):
+    """Do not load discovery tools, or install them, under js.
+
+    A discovery is a native executable the CLI spawns and talks to over a pipe,
+    and a browser cannot start one. Two places have to agree on that:
+
+    * `LoadDiscoveries` -- otherwise `Init` reports the missing builtin
+      discoveries, which the IDE reads as "update the indexes", retries, fails
+      the same way, and never settles its client.
+    * `Init` -- otherwise the first browser run downloads ELF binaries it can
+      never execute, from a host that sends no CORS header.
+
+    A count assertion on each anchor makes an upstream rewrite fail the build
+    instead of shipping a silent no-op.
+    """
+    discovery = os.path.join(src, "internal/arduino/cores/packagemanager/loader.go")
+    with open(discovery) as handle:
+        text = handle.read()
+    if "DiscoveriesCanBeSpawned()" in text:
+        return
+    old = """func (pme *Explorer) LoadDiscoveries() []error {
+\tvar merr []error"""
+    new = """func (pme *Explorer) LoadDiscoveries() []error {
+\tif !DiscoveriesCanBeSpawned() {
+\t\treturn nil
+\t}
+\tvar merr []error"""
+    if text.count(old) != 1:
+        sys.exit(
+            "internal/arduino/cores/packagemanager/loader.go changed upstream; "
+            "expected exactly one occurrence of: " + old
+        )
+    with open(discovery, "w") as handle:
+        handle.write(text.replace(old, new))
+
+    instances = os.path.join(src, "commands/instances.go")
+    with open(instances) as handle:
+        text = handle.read()
+    old = """\t\t// Install builtin tools if necessary
+\t\tif len(builtinToolsToInstall) > 0 {"""
+    new = """\t\t// The builtin tools are discovery executables; a browser cannot run them,
+\t\t// so it must not fetch them either.
+\t\tif !packagemanager.DiscoveriesCanBeSpawned() {
+\t\t\tbuiltinToolsToInstall = nil
+\t\t}
+\t\t// Install builtin tools if necessary
+\t\tif len(builtinToolsToInstall) > 0 {"""
+    if text.count(old) != 1:
+        sys.exit(
+            "commands/instances.go changed upstream; "
+            "expected exactly one occurrence of: " + old
+        )
+    with open(instances, "w") as handle:
+        handle.write(text.replace(old, new))
+    log("patched discovery loading for js")
+
+
 def module_dir_of(src, env, module):
     """Absolute path of a module in the module cache, downloading it first.
 
@@ -416,6 +510,8 @@ def main():
     patch_sync(src)
     patch_tool_host(src)
     patch_cors_gateway(src)
+    patch_discovery_loading(src)
+    patch_js_directories(src)
     vendor_pb(src, env)
     vendor_paths_helper(src, env)
     wasm = build(src, env)

@@ -33,6 +33,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -42,6 +43,7 @@ import (
 	"github.com/arduino/arduino-cli/commands"
 	rpc "github.com/arduino/arduino-cli/rpc/cc/arduino/cli/commands/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -175,6 +177,7 @@ func run(name string, tr transport, callback js.Value) {
 		if r := recover(); r != nil {
 			send(callback, map[string]any{
 				"type":    "error",
+				"code":    int(codes.Internal),
 				"message": fmt.Sprintf("panic in %s: %v\n%s", name, r, debug.Stack()),
 			})
 		}
@@ -186,8 +189,13 @@ func run(name string, tr transport, callback js.Value) {
 	} else {
 		err = invokeUnary(name, tr)
 	}
+	if err == errStreamStaysOpen {
+		// The call is over as far as this side is concerned, and the client will
+		// treat the stream as open for as long as the page lives.
+		return
+	}
 	if err != nil {
-		send(callback, map[string]any{"type": "error", "message": errorText(err)})
+		send(callback, failureEvent(err))
 		return
 	}
 	send(callback, map[string]any{"type": "done"})
@@ -230,14 +238,14 @@ func emitBinary(callback js.Value, eventType string, msg proto.Message, response
 	if response != nil && msg.ProtoReflect().Descriptor().FullName() != response.FullName() {
 		wrapped, err := wrapResponse(response, msg)
 		if err != nil {
-			send(callback, map[string]any{"type": "error", "message": err.Error()})
+			send(callback, failureEvent(err))
 			return
 		}
 		msg = wrapped
 	}
 	data, err := proto.Marshal(msg)
 	if err != nil {
-		send(callback, map[string]any{"type": "error", "message": err.Error()})
+		send(callback, failureEvent(err))
 		return
 	}
 	send(callback, map[string]any{
@@ -249,7 +257,7 @@ func emitBinary(callback js.Value, eventType string, msg proto.Message, response
 func emitProto(callback js.Value, eventType string, msg proto.Message) {
 	data, err := marshal.Marshal(msg)
 	if err != nil {
-		send(callback, map[string]any{"type": "error", "message": err.Error()})
+		send(callback, failureEvent(err))
 		return
 	}
 	event := map[string]any{"type": eventType, "data": json.RawMessage(data)}
@@ -272,9 +280,26 @@ func errorText(err error) string {
 	return err.Error()
 }
 
+// failureEvent carries both halves of what a gRPC client is given: the message
+// and the status code. The extension decides what to do from the code -- a
+// NotFound from LoadSketch means "this is not a sketch", not "something went
+// wrong" -- so a bare message is not enough to answer with.
+func failureEvent(err error) map[string]any {
+	code := codes.Unknown
+	if st, ok := status.FromError(err); ok {
+		code = st.Code()
+	}
+	return map[string]any{"type": "error", "code": int(code), "message": errorText(err)}
+}
+
 func errorEvent(args []js.Value, err error) any {
 	if len(args) >= 3 && args[2].Type() == js.TypeFunction {
-		args[2].Invoke(fmt.Sprintf(`{"type":"error","message":%q}`, err.Error()))
+		encoded, marshalErr := json.Marshal(failureEvent(err))
+		if marshalErr != nil {
+			args[2].Invoke(`{"type":"error","code":13,"message":"failed to encode error"}`)
+		} else {
+			args[2].Invoke(string(encoded))
+		}
 	}
 	return nil
 }
@@ -455,6 +480,42 @@ var streamHandlers = map[string]streamHandler{
 		stream := commands.GitLibraryInstallStreamResponseToCallbackFunction(ctx, taskEmitter(emit))
 		return srv.GitLibraryInstall(&req, stream)
 	},
+	// The desktop IDE's board list is a watch: the daemon pushes a new list
+	// whenever a port appears or disappears. The page has no in-process
+	// discovery at all -- the builtin discovery tools are host executables, so
+	// the js build loads none of them (see packagemanager/discovery_js.go) --
+	// and its ports come from WebSerial. The watch therefore answers the shape
+	// the daemon answers when nothing changes: no events and no end.
+	// `errStreamStaysOpen` stops `run` from sending `done`, which would tell the
+	// IDE the watch had ended and make it open another one immediately.
+	"BoardListWatch": func(decode decode, emit emitter) error {
+		var req rpc.BoardListWatchRequest
+		if err := decode(&req); err != nil {
+			return err
+		}
+		return errStreamStaysOpen
+	},
+	// The remaining five streaming RPCs each need something the page does not
+	// have behind this transport: a host toolchain run with a serial port on the
+	// other end (upload, uploadUsingProgrammer, burnBootloader), or a serial
+	// device owned by the page (monitor, debug). Answering them by name is
+	// better than letting `invokeUnary` report "not a unary RPC", which says
+	// nothing to whoever reads it.
+	"Upload":                 refuseStream("Upload", "uploads run over WebSerial from the page, not through the wasm CLI"),
+	"UploadUsingProgrammer":  refuseStream("UploadUsingProgrammer", "uploads run over WebSerial from the page, not through the wasm CLI"),
+	"BurnBootloader":         refuseStream("BurnBootloader", "a bootloader burn drives a programmer over WebSerial, which the page does not wire yet"),
+	"Monitor":                refuseStream("Monitor", "the serial monitor owns a port the page has not wired to WebSerial yet"),
+	"Debug":                  refuseStream("Debug", "debugging needs a gdb session over a device the page does not have"),
+}
+
+// errStreamStaysOpen marks a handler that has answered its stream and will
+// never end it, which is a legal gRPC server stream.
+var errStreamStaysOpen = errors.New("stream stays open")
+
+func refuseStream(name, why string) streamHandler {
+	return func(decode decode, emit emitter) error {
+		return fmt.Errorf("%s is not available in the page: %s", name, why)
+	}
 }
 
 var _ = commands.NewArduinoCoreServer

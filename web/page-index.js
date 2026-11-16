@@ -80,10 +80,16 @@ export function makeXhrRead(base) {
 
 // A relative URL is used for the page directory itself, so the same string
 // works over http and from file://.
-export function installIndexShim({ fallback = globalThis.fetch.bind(globalThis) } = {}) {
+export function installIndexShim({
+  fallback = globalThis.fetch.bind(globalThis),
+  base = "",
+} = {}) {
+  // The indexes sit beside the console page, not beside whichever page calls
+  // this: a page one directory down (the IDE) has to pass its own base, or the
+  // reader asks for `ide/indexes/...` and every download 404s.
   const routes = [AVR_BASE, NRF52_BASE].map((prefix) => ({
     prefix,
-    read: makeXhrRead(prefix),
+    read: makeXhrRead(base + prefix),
   }));
   globalThis.fetch = createIndexFetch({ routes, fallback });
   return globalThis.fetch;

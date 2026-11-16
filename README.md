@@ -539,17 +539,17 @@ selected`, a `sketch_20261114l.ino` is open in a Monaco editor with
 `void setup() {}`, and 120 RPC calls have been answered. `node test/ide.mjs`
 asserts those, and it fails six checks when the install line is removed.
 
-Every RPC the boot makes now has an implementation; `window.__inpageMissing` is
-empty, and `test/ide.mjs` fails and names the method when one is not. The eight
-CLI-backed services (`boards-service`, `config-service`, `example-service`,
-`library-service`, `core-service`, `arduino-firmware-uploader`,
-`arduino-daemon`) answer the empty value of their declared type — `[]`, `{}`,
-`{ config: undefined, messages: [] }` — rather than `undefined`, and the three
-that would need to run something (`compile`, `upload`, `flash`) refuse with a
-message saying so. Wiring them to `arduinoCLI.call` is the remaining work; until
-then the IDE shows its own diagnosis, two notifications reading "Could not
-install Arduino AVR platform: Error: Could not find platform" and "Could not
-install Arduino_BuiltIn library: Error: Could not find library".
+Every RPC the boot makes has an implementation; `window.__inpageMissing` is
+empty, and `test/ide.mjs` fails and names the method when one is not. Answering
+a call and doing the work are different things, so the stubs are no longer the
+answer for the services that can be real: seven paths —
+`boards-service`, `library-service`, `core-service`, `config-service`,
+`arduino-daemon`, `remote-filesystem`, `sketches-service` — are served by
+arduino-ide's own compiled classes when the bundle is on the page, and fall back
+to the stub method by method, with each fall-through recorded. The stubs remain
+for what a browser genuinely has no backend for: there is no plugin host, no
+debug adapter, and no serial monitor, so their empty answers are the true ones.
+`upload` and `flash` still refuse with a message saying so.
 
 One boot error is a real gap, not a stub: `A resource provider for
 'user-storage:/user/keymaps.json' is not registered`, thrown from
@@ -558,8 +558,8 @@ are `Canceled: Canceled` from model disposal.
 
 ### The transport the IDE's own services need
 
-The eight CLI-backed services listed above are still the page's own answers. The
-first half of replacing them is the transport, and it is measured.
+The transport is what lets the extension's own services run in the page. It is
+measured before anything above it is written.
 
 `ide/inpage/cli-client.mjs` builds an object shaped like the gRPC client those
 services call, out of the service definition the shipped build already contains:
@@ -595,14 +595,95 @@ channel to a spawned daemon. `BoardsServiceImpl.getInstalledPlatforms()` returns
 `testpkg:avr`, `getInstalledBoards()` returns `Test Board`, its `search` reaches
 `boardSearch`; `LibraryServiceImpl` searches the fixture index, installs
 `TestLib` through the real `install` path (which stops and starts board discovery
-on the way), and lists it afterwards. Five checks, and the page's remaining work
-is the bundle that puts these classes in the browser.
+on the way), and lists it afterwards. Five checks.
 
-Not done yet, and named as such: the classes are not bundled for the browser and
-not registered on the in-page channel, so the frontend still talks to
-`ide/inpage/services.js`; `CoreServiceImpl` and the sketches and examples
-services are unproven, because they write files through Node's `fs`; upload and
-WebUSB remain untested.
+### The bundle behind the page
+
+`scripts/build-ide-services.py` bundles those same classes for the browser with
+the IDE tree's own webpack, so no second bundler is added to the project. The
+webpack config lives in `ide/inpage/browser/` and is not a reimplementation:
+`entry.js` imports the extension's compiled modules, and the config answers each
+Node built-in they import with one small module in that directory, all of them
+forwarding to the page's single filesystem shim.
+
+Three rules in that config are load-bearing.
+
+The aliases are keyed by resolved absolute path as well as by bare id.
+`core-client-provider.js` imports `./arduino-daemon-impl`, and
+`resolve.alias` matches the request string, so the bare-id entry alone never
+fires. The same holds for `./arduino-core-service-client` and `./exec-util`.
+
+`node:` is stripped by `NormalModuleReplacementPlugin(/^node:/)` before the
+aliases are consulted, because webpack treats the prefix as a URI scheme and
+never resolves it.
+
+The bundle is `umd` with `output.globalObject: "globalThis"`. Its two consumers
+are `require()` in the Node tests and a script tag in the page; webpack's
+inferred UMD root is `self`, which Node does not define.
+
+The bundle is 5,513,828 bytes and the build refuses to write one under 1 MiB,
+because a 5 KiB file is an empty shell, not a bundle.
+
+#### `Buffer` goes to the modules that name it
+
+The extension's `cli-error-parser` calls `Buffer.concat(content).toString('utf8')`
+without importing anything. Installing `Buffer` on `globalThis` in the entry
+point compiles and runs, and was measured to **blank the editor**: with the
+global installed the page booted to `editors: 0` and a 36,692-character body;
+without it, `editors: 2` and 49,232, three runs each. Some module in the
+frontend takes a different branch when a global `Buffer` exists.
+
+So the dependency is provided to the modules that name it, not to the world:
+`new webpack.ProvidePlugin({ Buffer: ["buffer", "Buffer"] })`. Two tests guard
+this from opposite directions. `test/ide-buffer.mjs` asserts the sources — no
+global assignment in `entry.js`, the plugin present in the config, and, when the
+bundle is on disk, one `var Buffer = __webpack_require__(…)["Buffer"]` binding
+per module and no global assignment in it. `test/ide-page.mjs` grades the
+consequence in a browser. The source test runs in CI; the browser test cannot.
+
+#### The tool-instantiation seam
+
+The same `process` object must satisfy two consumers that want opposite things.
+Emscripten-generated loaders read
+`process.versions.node` to decide whether they are in Node, and in a browser
+that branch ends in `import("module")`, which throws
+`Failed to resolve module specifier 'module'` — that is how every `avr-g++`
+compile failed when the page's `process` advertised a Node version. The IDE
+bundle needs `versions.node` present, because `es6-shim` chooses its
+`Map`/`Set` iterator fallbacks by it, and Node's own shim reads it too.
+
+The fix is at the boundary rather than in the environment: `createToolInstance()`
+in `web/tool-common.js` hides `process.versions` for the duration of one loader
+instantiation and restores it in a `finally`. Both instantiation sites use it
+(`web/avr-driver.js`, `web/arm-tools.js`). `test/tool-common.mjs` asserts the
+property in Node — the version absent during the factory call, present
+afterwards as the same object, absent-not-falsy, and restored when the factory
+throws — because Node cannot reproduce the browser's failure.
+
+#### What the page actually runs
+
+`node test/ide-page.mjs` boots `web/ide/index.html` in headless Chrome over
+`file://`, waits for the workbench, then drives the page's own service surface
+(`window.__inpageTargets`, the published RPC proxies) through the sequence a user
+performs: install `arduino:avr` from the shipped index, create a sketch, compile
+it. It asserts 16 things, including that the window titles the sketch, that
+Monaco displays the sketch's source, that the bundle is the real one
+(`window.__inpageReal === 'bundled'`), that no service method went unanswered,
+and that the compile ends with the CLI's own section sizes — measured
+`text 2044 of 32256`, `data 197 of 2048`.
+
+Measured 2026-11-16 on 12 cores: 166 s end to end, starting from an empty Chrome
+profile. It is not in CI and cannot be: it needs a built IDE tree
+(`python3 scripts/build-ide.py` and `python3 scripts/build-ide-services.py`) and
+a browser. It exits 2 with that command printed when the tree is missing, and it
+writes `build/ide-page.png`. See the tests section for the rest of the local-only
+commands.
+
+Still stubbed, and named as such: the serial monitor (a Proxy that throws by
+name), the plugin host, and the debug adapter, because a browser has no backend
+for them at all; `upload` and `flash` refuse by name; and the `nrfjprog` tool
+archive the page carries is a dummy, since the tools it would install are not
+reachable from here.
 
 Running the Electron-shaped server is still possible and still the reference
 path:
@@ -649,15 +730,33 @@ python3 test/serve_test.py   # the static server's headers
 python3 test/gateway_test.py # the CORS gateway, over a socket pair
 node test/gateway.mjs        # the gateway URL rewrite in Go's transport
 node test/ide.mjs            # the real IDE frontend, headless Chrome, needs a build
-node test/ide-client.mjs     # the IDE's gRPC client, over the wasm bridge
-node test/ide-services.mjs   # the IDE's own backend service classes
+node test/ide-buffer.mjs     # how the services bundle gets Buffer
+node test/ide-client.mjs     # the IDE's gRPC client, needs a built IDE tree
+node test/ide-services.mjs   # the IDE's own backend classes, same precondition
+node test/ide-page.mjs       # the IDE's own UI in Chrome, compiles a sketch
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
 ```
 
 `test/arm-tools.mjs` is not in that list because it needs `build/arm-wasm/out/`,
 which a fresh clone does not have: the tools are built by the script and
-gitignored. `test/nrf52.mjs` needs the network. Everything else runs in CI.
+gitignored. `test/nrf52.mjs` needs the network.
+
+The three IDE tests that need a built tree all grade `web/arduino-cli.wasm`, the
+file the page ships. A copy in `/tmp` once made `test/ide-client.mjs` grade a wasm
+built before the bridge carried gRPC status codes, and the failure read as a
+product defect for two runs. `ARDUINO_WASM_BIN` still overrides it; the default
+does not. A missing input is a named precondition: each prints the path, the
+command that builds it, and exits 2 rather than 1.
+
+`test/ide-client.mjs` and `test/ide-services.mjs` need a built IDE tree under
+`build/arduino-ide/`. They drive arduino-ide's own generated gRPC client and its
+own compiled service classes, and neither exists anywhere else: the extension is
+not published to npm, and its task classes are TypeScript compiled by
+`scripts/build-ide.py`. CI does not build that tree because it means a yarn
+install of the whole monorepo, so these two run where the tree exists. This is a
+missing precondition, not a flake, and it is why the workflow does not call
+them.
 
 `test/run.mjs` drives the wasm CLI directly: init, index update, platform
 search, platform install (with its tools), library install, board

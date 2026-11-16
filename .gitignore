@@ -12,3 +12,6 @@ test/fixtures/*
 
 __pycache__/
 *.pyc
+
+# The published IDE page is built, not committed: scripts/build-ide.py writes it.
+web/ide/

@@ -34,6 +34,7 @@ import { AVR_DEVICES } from "./avr-mcus.js";
 import { readTarGz } from "./tar.js";
 import {
   basename,
+  createToolInstance,
   elfSections,
   flagValue,
   flagValues,
@@ -290,7 +291,7 @@ export async function createAvrDriver(options) {
     const wasmBinary = await readAsset(name + ".wasm");
     let stdout = "";
     let stderr = "";
-    const instance = await create({
+    const instance = await createToolInstance(create, {
       wasmBinary,
       noInitialRun: true,
       noExitRuntime: true,

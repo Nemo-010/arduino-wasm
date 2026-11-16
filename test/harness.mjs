@@ -28,6 +28,9 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
     stdout: tee("stdout", stdout),
     stderr: tee("stderr", stderr),
     cwd,
+    // The page's own environment. `go.env` is set from the same values below, so
+    // a module that reads `process.env` and the CLI see one environment.
+    env: { HOME: "/home/arduino", TMPDIR: "/tmp", PATH: "/bin", ...env },
   });
 
   await shim.ready();
@@ -73,12 +76,20 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
   // callBinary carries the same events with protobuf binary instead of JSON,
   // which is what the IDE's generated client sends and expects. The payload
   // stays base64 so the caller can hand it to the generated message class.
-  function callBinary(method, requestBase64, { timeoutMs = 120000, onEvent } = {}) {
+  //
+  // The third argument is the event observer itself, because that is the seam
+  // `ide/inpage/cli-client.mjs` was written against: it forwards each event to
+  // the caller as the CLI produces it. There is no default timeout -- a core
+  // install through the IDE runs for minutes, and the bridge always ends a call
+  // with `done` or `error`.
+  function callBinary(method, requestBase64, options) {
+    const onEvent = typeof options === "function" ? options : options && options.onEvent;
+    const timeoutMs = (options && typeof options === "object" && options.timeoutMs) || 0;
     return new Promise((resolve, reject) => {
       const events = [];
-      const timer = setTimeout(() => {
+      const timer = timeoutMs ? setTimeout(() => {
         reject(new Error(`${method}: timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      }, timeoutMs) : null;
       globalThis.arduinoCLI.callBinary(method, requestBase64, (raw) => {
         const event = JSON.parse(raw);
         events.push(event);
@@ -86,6 +97,7 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
         if (event.type === "error") {
           clearTimeout(timer);
           const error = new Error(`${method}: ${event.message}`);
+          if (typeof event.code === "number") error.code = event.code;
           error.events = events;
           reject(error);
         } else if (event.type === "done") {
@@ -109,6 +121,7 @@ export async function startCLI({ stdout, stderr, cwd = "/home/arduino", env = {}
         if (event.type === "error") {
           clearTimeout(timer);
           const error = new Error(`${method}: ${event.message}`);
+          if (typeof event.code === "number") error.code = event.code;
           error.events = events;
           reject(error);
         } else if (event.type === "done") {

@@ -19,14 +19,19 @@ function importFrom(directory) {
   return (name) => import(new URL(directory + name + ".mjs", document.baseURI).href);
 }
 
-export function installPageTools({ nodefs, log } = {}) {
+// `base` is for a page that does not sit at the site root: the IDE's page lives
+// in its own directory, and the toolchains are one level up. Everything below is
+// resolved against the document's own URL, so the base is the only difference.
+export function installPageTools({ nodefs, log, base = "" } = {}) {
+  const avrDir = base + AVR_TOOLS;
+  const armDir = base + ARM_TOOLS;
   const avr = createAvrAssets({
-    load: makeXhrRead(AVR_TOOLS),
-    importModule: importFrom(AVR_TOOLS),
+    load: makeXhrRead(avrDir),
+    importModule: importFrom(avrDir),
   });
   const arm = createArmAssets({
-    load: makeXhrRead(ARM_TOOLS),
-    importModule: importFrom(ARM_TOOLS),
+    load: makeXhrRead(armDir),
+    importModule: importFrom(armDir),
   });
   globalThis.arduinoExec = createExec({
     nodefs,

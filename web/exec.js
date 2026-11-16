@@ -114,11 +114,17 @@ export function createExec({ nodefs, readAsset, readWasm, importModule, createDr
         await vfs.writeFile(file.path, file.data);
       }
     } catch (error) {
+      // The Go side reads stdout, stderr and the exit code, and nothing else.
+      // A crash reported only in `error` reached the CLI as "exit status 1"
+      // with no text, so a driver exception looked exactly like a compiler
+      // rejecting the source. Put it where the CLI and the IDE's output panel
+      // both look.
+      const detail = "arduinoExec failed: " + (error && error.stack ? error.stack : String(error));
       callback({
         code: 1,
         stdout: "",
-        stderr: "",
-        error: "arduinoExec failed: " + (error && error.stack ? error.stack : String(error)),
+        stderr: detail + "\n",
+        error: detail,
       });
       return;
     }

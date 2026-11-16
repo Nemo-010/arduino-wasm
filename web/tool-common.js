@@ -125,3 +125,25 @@ export function elfSections(bytes) {
   }
   return sections;
 }
+
+// Emscripten decides at instantiation whether it is running under Node, and
+// its Node branch starts with `await import("module")` — a bare specifier no
+// browser can resolve. The page's `process` is deliberately Node-like, because
+// the IDE bundle reads `process.versions.node`, so the tools are told the truth
+// for the length of one instantiation instead: hide the version, call the
+// factory, put it back.
+//
+// The flag is read once, synchronously, before the factory's first await, so
+// the property only has to be gone while the call starts. Tool instances are
+// created one at a time per driver, so two tools never race for this.
+export async function createToolInstance(create, options) {
+  const host = typeof process === "object" && process ? process : null;
+  const had = host !== null && Object.prototype.hasOwnProperty.call(host, "versions");
+  const saved = had ? host.versions : undefined;
+  try {
+    if (had) delete host.versions;
+    return await create(options);
+  } finally {
+    if (had) host.versions = saved;
+  }
+}

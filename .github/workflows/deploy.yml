@@ -70,19 +70,25 @@ jobs:
       - name: Test the page's nRF52 compile
         run: node test/page-nrf52.mjs
 
+      # Source-level and unbuilt-tree-free: the entry point must install no
+      # global Buffer and the webpack config must provide it per module. The
+      # browser consequence is graded by `test/ide-page.mjs`, which needs a
+      # built IDE tree and cannot run here.
+      - name: Test how the services bundle gets Buffer
+        run: node test/ide-buffer.mjs
+
       # The IDE's own client transport and its own service classes, against the wasm
       # the page ships. The tests build the same bridge the page loads, so a change
       # that only works against a hand-built wasm fails here.
-      - name: Test the IDE client transport
-        run: node test/ide-client.mjs
-        env:
-          ARDUINO_WASM_BIN: web/arduino-cli.wasm
-
-      - name: Test the IDE's own backend services
-        run: node test/ide-services.mjs
-        env:
-          ARDUINO_WASM_BIN: web/arduino-cli.wasm
-
+      # `test/ide-client.mjs` and `test/ide-services.mjs` are not here on purpose.
+      # Both drive arduino-ide's own generated gRPC client and service classes,
+      # and those exist only in a built IDE tree: the extension is not published
+      # to npm (the name there is a security placeholder), and its task classes
+      # are TypeScript compiled into `build/arduino-ide/`. Running them in CI
+      # would mean a yarn install of the whole monorepo, so they stay local and
+      # their precondition is named in the README. Everything they touch that is
+      # ours -- the wasm bridge, the binary transport, the response wrap -- is
+      # covered here by the page tests.
       - name: Test the static server
         run: python3 test/serve_test.py
 

@@ -8,13 +8,17 @@
 // so both the unary callback shape and the streaming event shape are exercised
 // by the same code the IDE's services will use.
 
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { startCLI } from "./harness.mjs";
 import { fixtureFetch, FIXTURE_ORIGIN } from "./fixture-fetch.mjs";
 import { createArduinoCoreClient, CORE_SERVICE_NAME } from "../ide/inpage/cli-client.mjs";
 
 const realProcess = process;
-const extension = "/workspace/arduino-wasm/build/arduino-ide/arduino-ide-extension/lib/node";
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const extension = join(root, "build/arduino-ide/arduino-ide-extension/lib/node");
 const require = createRequire(extension + "/");
 
 function check(condition, message) {
@@ -54,8 +58,25 @@ function streamed(client, name, request, timeoutMs = 180000) {
 
 async function main() {
   const origin = FIXTURE_ORIGIN;
+  // The build that ships, not a copy in /tmp: a stale file there once made this
+  // test grade a wasm from before the bridge carried gRPC codes, and the failure
+  // looked like a product defect.
+  const wasm = realProcess.env.ARDUINO_WASM_BIN || join(root, "web", "arduino-cli.wasm");
+  if (!existsSync(wasm)) {
+    console.log("missing: " + wasm);
+    console.log("build it first: python3 scripts/update.py");
+    realProcess.exit(2);
+    return;
+  }
+  if (!existsSync(extension)) {
+    console.log("missing: " + extension);
+    console.log("build it first: python3 scripts/build-ide.py");
+    realProcess.exit(2);
+    return;
+  }
+  console.log("  wasm: " + wasm);
   const cli = await startCLI({
-    wasm: realProcess.env.ARDUINO_WASM_BIN || "/tmp/cli-test.wasm",
+    wasm,
     fetch: fixtureFetch(),
     env: {
       ARDUINO_DEFAULT_INDEX_URL: origin + "/package_fixture_index.json",
@@ -74,7 +95,13 @@ async function main() {
 
   const client = createArduinoCoreClient({
     service: grpc[CORE_SERVICE_NAME],
-    callBinary: (method, requestBase64) => cli.callBinary(method, requestBase64),
+    // Forward the observer: the client delivers events as they arrive, and a
+    // transport that drops it would still "work" while hiding every progress
+    // message -- which is exactly the bug this line prevents.
+    callBinary: (method, requestBase64, onEvent) => cli.callBinary(method, requestBase64, onEvent),
+    // The same class `service-error.js` tests against, so a status this test
+    // sees is the status the IDE's services see.
+    Metadata: require("@grpc/grpc-js").Metadata,
   });
 
   console.log("\nVersion (unary, protobuf binary both ways)");
@@ -172,6 +199,26 @@ async function main() {
   const libraries = listed.getInstalledLibrariesList().map((entry) => entry.getLibrary().getName());
   console.log("  " + JSON.stringify(libraries));
   check(libraries.includes("TestLib"), "the installed library reaches the client");
+
+  // A status carries a code, and the extension branches on it: `SketchesServiceImpl`
+  // asks `isNotFoundError(err)` and turns NOT_FOUND into "this is not a sketch",
+  // which is what `_isSketchFolder` answers for the sketchbook root. A status
+  // that said UNKNOWN for every failure made that a boot-time rejection.
+  const failure = await unary(
+    client,
+    "loadSketch",
+    new commands.LoadSketchRequest().setSketchPath("/home/arduino/Arduino"),
+  ).then(
+    () => { throw new Error("loadSketch on a directory that is not a sketch succeeded"); },
+    (error) => error,
+  );
+  console.log("  code " + failure.code + " " + JSON.stringify(failure.details));
+  check(failure.code === 5, "a NotFound from the CLI keeps its code (5) through the bridge");
+  check(failure instanceof Error, "the failure is an Error, which is what ServiceError.is requires");
+  check(typeof failure.details === "string" && failure.details.includes("Can't open sketch"),
+    "the failure carries the CLI's own message in details");
+  check(failure.metadata && typeof failure.metadata.get === "function",
+    "the failure carries Metadata, the other half of ServiceError.is");
 
   console.log("\nall checks passed");
 }

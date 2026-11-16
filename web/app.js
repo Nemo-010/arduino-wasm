@@ -4,9 +4,10 @@
 // environment the Go runtime expects (fs/path/process), and the calls into the
 // CLI. Everything else is the CLI's own work.
 
-import { createNodeFS, IdbBackend, MemoryBackend, deleteDatabase } from "./nodefs.js";
+import { deleteDatabase } from "./nodefs.js";
+import { startPageCLI } from "./bootstrap.js";
 import { AVR_INDEX_URL, NRF52_INDEX_URL, installIndexShim } from "./page-index.js";
-import { installPageTools } from "./page-tools.js";
+import { CONFIG_KEYS, extraIndexUrls, readConfig, settingsYaml } from "./page-config.js";
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
@@ -82,43 +83,6 @@ function call(method, request, { quiet = false } = {}) {
 // ---------------------------------------------------------------------------
 // Boot
 
-// The index URLs are the only configuration the page stores. An empty value
-// means "use the URL compiled into the CLI", which is Arduino's own.
-const CONFIG_KEYS = {
-  defaultIndex: "arduino.index.default",
-  extraIndexes: "arduino.index.extra",
-  libraryIndex: "arduino.index.library",
-  gateway: "arduino.index.gateway",
-};
-
-function readConfig() {
-  const config = {};
-  for (const [name, key] of Object.entries(CONFIG_KEYS)) {
-    config[name] = globalThis.localStorage?.getItem(key) ?? "";
-  }
-  return config;
-}
-
-function extraIndexUrls(config) {
-  return config.extraIndexes.split(/[\s,]+/).filter(Boolean);
-}
-
-function settingsYaml(config) {
-  const lines = [
-    "directories:",
-    "  data: /home/arduino/.arduino15",
-    "  downloads: /home/arduino/.arduino15/staging",
-    "  user: /home/arduino/Arduino",
-  ];
-  const extra = extraIndexUrls(config);
-  if (extra.length) {
-    lines.push("board_manager:", "  additional_urls:");
-    for (const url of extra) lines.push(`    - ${JSON.stringify(url)}`);
-  }
-  lines.push("");
-  return lines.join("\n");
-}
-
 async function boot() {
   const config = readConfig();
   // Blank means "the index this page carries". Arduino's own index cannot be
@@ -137,50 +101,16 @@ async function boot() {
   const version = await loadJSON("version.json");
   setStatus(`arduino-cli ${version.arduinoCli}, ${(version.wasmBytes / 1e6).toFixed(1)} MB wasm`);
 
-  const backend = globalThis.indexedDB ? new IdbBackend("arduino-wasm") : new MemoryBackend();
-  if (!globalThis.indexedDB) {
-    log("no IndexedDB here; files are kept in memory only", "err");
-  }
-  const shim = createNodeFS({
-    backend,
-    stdout: (text) => log(text),
-    stderr: (text) => log(text, "err"),
-    cwd: "/home/arduino",
-  });
-  await shim.ready();
-  globalThis.fs = shim.fs;
-  globalThis.path = shim.path;
-  globalThis.process = shim.process;
-
-  // Before the CLI runs: a compile asks arduinoExec for every tool it wants, and
-  // answering "not implemented on js" is only correct when the toolchain is
-  // genuinely absent.
-  installPageTools({ nodefs: shim, log });
-
-  // wasm_exec.js is a classic script, already loaded by the page. It installs
-  // globalThis.Go and leaves our fs/path/process alone because they exist.
-  const go = new globalThis.Go();
-  go.argv = ["arduino-cli"];
-  go.env = { HOME: "/home/arduino", TMPDIR: "/tmp", PATH: "/bin" };
+  // The CLI's environment is frozen when the Go program starts, so everything it
+  // needs for its whole life is passed here.
+  const goEnv = {};
   // Always set: defaultIndex falls back to the index this page carries.
-  go.env.ARDUINO_DEFAULT_INDEX_URL = defaultIndex;
-  if (config.libraryIndex) go.env.ARDUINO_LIBRARIES_INDEX_URL = config.libraryIndex;
-  // Read once, at startup: the Go js ABI copies the environment into linear
-  // memory when the program starts, so this cannot be changed afterwards.
-  if (config.gateway) go.env.ARDUINO_CORS_GATEWAY = config.gateway;
-  go.exit = (code) => log(`the CLI exited with code ${code}`, "err");
+  goEnv.ARDUINO_DEFAULT_INDEX_URL = defaultIndex;
+  if (config.libraryIndex) goEnv.ARDUINO_LIBRARIES_INDEX_URL = config.libraryIndex;
+  if (config.gateway) goEnv.ARDUINO_CORS_GATEWAY = config.gateway;
 
-  const ready = new Promise((resolve) => {
-    globalThis.arduinoCLIReady = resolve;
-  });
-  const response = await fetch("arduino-cli.wasm");
-  if (!response.ok) {
-    throw new Error(`arduino-cli.wasm is not readable (${response.status}): ${MISSING_BUILD}`);
-  }
-  const { instance: wasm } = await WebAssembly.instantiateStreaming(response, go.importObject);
-  go.run(wasm); // never settles; the Go program blocks on select {}
-  await ready;
-  cli = globalThis.arduinoCLI;
+  const { cli: started } = await startPageCLI({ log, goEnv, wasmUrl: "arduino-cli.wasm" });
+  cli = started;
 
   log("CLI loaded");
   // The field was just prefilled for the user, so it is also what gets

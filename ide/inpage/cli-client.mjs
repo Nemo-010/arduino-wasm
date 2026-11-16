@@ -39,10 +39,33 @@ function encodeBase64(bytes) {
   return btoa(binary);
 }
 
-function statusOf(events) {
-  const error = events.find((event) => event.type === "error");
-  if (!error) return { code: 0, details: "OK", message: "OK", metadata: {} };
-  return { code: 2, details: error.message, message: error.message, metadata: {} };
+// A gRPC error is not a bare Error. `service-error.js` recognises one by
+// `code`, `details` and `metadata instanceof Metadata`, and only then does the
+// IDE parse a compile failure into compiler errors instead of reporting an
+// unexpected error. The class has to come from the caller, because the page
+// aliases `@grpc/grpc-js` to a shim while a Node test has the real package.
+// Without it the status is still honest -- it just lacks the marker.
+function statusObject(code, details, Metadata) {
+  return { code, details, message: details, metadata: Metadata ? new Metadata() : undefined };
+}
+
+function statusError(code, details, Metadata) {
+  const error = new Error(details);
+  error.code = code;
+  error.details = details;
+  if (Metadata) error.metadata = new Metadata();
+  return error;
+}
+
+function statusOf(events, Metadata) {
+  const failure = [...events].reverse().find((event) => event.type === "error");
+  if (!failure) return statusObject(0, "OK", Metadata);
+  // The bridge carries the code the CLI's error declares, and the extension
+  // branches on it: a NotFound from LoadSketch is "this is not a sketch" and is
+  // handled, while an unknown failure is a bug worth showing. A Go error with
+  // no status of its own is UNKNOWN, which is what grpc-go would have said.
+  const code = typeof failure.code === "number" ? failure.code : 2;
+  return statusObject(code, failure.message, Metadata);
 }
 
 /**
@@ -56,7 +79,7 @@ function statusOf(events) {
  * @param {(event: {type: string, message?: string}) => void} [options.onEvent]
  *   optional observer for every event, used by the page's log
  */
-export function createArduinoCoreClient({ service, callBinary, onEvent }) {
+export function createArduinoCoreClient({ service, callBinary, onEvent, Metadata }) {
   const client = {
     close() {},
     getChannel() {
@@ -82,24 +105,57 @@ export function createArduinoCoreClient({ service, callBinary, onEvent }) {
       client[name] = (request) => {
         const stream = new EventEmitter();
         const bytes = request.serializeBinary();
-        callBinary(goName, encodeBase64(bytes), onEvent)
-          .then((events) => {
-            for (const event of events) {
-              if (event.type === "error" || event.type === "done") continue;
-              if (typeof event.binary === "string") {
-                stream.emit("data", Response.deserializeBinary(decodeBase64(event.binary)));
-              }
+        const events = [];
+        let settled = false;
+        // Events are delivered as the CLI produces them, so a platform install
+        // reports progress while it runs instead of when it ends. The promise
+        // is only consulted for the stream's final status.
+        const observe = (event) => {
+          events.push(event);
+          if (onEvent) onEvent(event);
+          if (settled) return;
+          if (event.type === "error" || event.type === "done") return;
+          if (typeof event.binary === "string") {
+            stream.emit("data", Response.deserializeBinary(decodeBase64(event.binary)));
+          }
+        };
+        // A stream ends once. Cancelling is one of the ways it ends, and the
+        // extension's BoardDiscovery waits for exactly that signal: its
+        // `stop()` disposes the watcher and resolves when the stream reports
+        // CANCELLED. A no-op cancel left that promise to time out after 10 s.
+        let cancelCall = null;
+        const end = (status) => {
+          if (settled) return;
+          settled = true;
+          stream.emit("status", status);
+          stream.emit("end");
+        };
+        const call = callBinary(goName, encodeBase64(bytes), observe);
+        if (call && typeof call.cancel === "function") cancelCall = () => call.cancel();
+        call
+          .then(() => {
+            const status = statusOf(events, Metadata);
+            if (status.code !== 0) {
+              stream.emit("error", statusError(status.code, status.details, Metadata));
             }
-            const status = statusOf(events);
-            stream.emit("status", status);
-            if (status.code !== 0) stream.emit("error", new Error(status.details));
-            stream.emit("end");
+            end(status);
           })
           .catch((error) => {
-            stream.emit("error", error);
-            stream.emit("end");
+            // The transport rejects with the CLI's message; the events carry it
+            // too, and they are what the status is built from.
+            const status = statusOf(events, Metadata);
+            const code = status.code !== 0 ? status.code : 2;
+            const details = status.code !== 0 ? status.details : error.message;
+            stream.emit("error", statusError(code, details, Metadata));
+            end(statusObject(code, details, Metadata));
           });
-        stream.cancel = () => {};
+        stream.cancel = () => {
+          if (settled) return;
+          if (cancelCall) cancelCall();
+          // grpc-js reports a cancelled call as status CANCELLED, then ends.
+          stream.emit("error", statusError(1, "Cancelled", Metadata));
+          end(statusObject(1, "Cancelled", Metadata));
+        };
         return stream;
       };
       continue;
@@ -112,25 +168,45 @@ export function createArduinoCoreClient({ service, callBinary, onEvent }) {
       const request = args[0];
       if (!callback) return undefined;
       const bytes = request.serializeBinary();
-      callBinary(goName, encodeBase64(bytes), onEvent)
-        .then((events) => {
-          const failure = events.find((event) => event.type === "error");
+      const events = [];
+      const observe = (event) => {
+        events.push(event);
+        if (onEvent) onEvent(event);
+      };
+      callBinary(goName, encodeBase64(bytes), observe)
+        .then((resolved) => {
+          // The transport resolves with the events it dispatched, and a
+          // transport that reports only through the observer still works
+          // because the same events are collected here. Both shapes are real:
+          // the harness and the page's bridge resolve with an array.
+          const seen = Array.isArray(resolved) && resolved.length ? resolved : events;
+          const failure = seen.find((event) => event.type === "error");
           if (failure) {
-            callback(new Error(failure.message));
+            // The code is the CLI's own: the extension tests it (NOT_FOUND
+            // means "not a sketch", NOT_FOUND from upload means "no port"),
+            // and a status that says UNKNOWN for everything erases that.
+            const status = statusOf(seen, Metadata);
+            callback(statusError(status.code, status.details, Metadata));
             return;
           }
-          const result = [...events].reverse().find((event) => typeof event.binary === "string");
+          const result = [...seen].reverse().find((event) => typeof event.binary === "string");
           if (!result) {
-            callback(new Error(goName + ": the CLI reported no response"));
+            callback(statusError(2, goName + ": the CLI reported no response", Metadata));
             return;
           }
-          callback(null, Response.deserializeBinary(decodeBase64(result.binary)), {
-            code: 0,
-            details: "OK",
-            metadata: {},
-          });
+          callback(null, Response.deserializeBinary(decodeBase64(result.binary)), statusObject(0, "OK", Metadata));
         })
-        .catch((error) => callback(error));
+        .catch((error) => {
+          // Two transports are real. The page's bridge resolves with the events
+          // it dispatched; a Node-side driver rejects on the error event and
+          // attaches them as `error.events`. Handing the raw transport error
+          // back would lose the code, which is the half the extension reads.
+          const seen = Array.isArray(error.events) && error.events.length ? error.events : events;
+          const status = statusOf(seen, Metadata);
+          const code = status.code !== 0 ? status.code : 2;
+          const details = status.code !== 0 ? status.details : error.message;
+          callback(statusError(code, details, Metadata));
+        });
       return undefined;
     };
   }
