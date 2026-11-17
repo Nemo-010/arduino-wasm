@@ -647,8 +647,13 @@ debug adapter, and no serial monitor, so their empty answers are the true ones.
 `upload` is now answered by arduino-ide's own `CoreServiceImpl`: the CLI builds
 the board's declared upload command and hands it to the page's exec seam, the
 same seam a compile uses (`node test/upload.mjs` asserts the real command line).
-What is still missing is the flasher behind that seam for each upload tool; the
-stub's `upload` and firmware `flash` remain the fallback and refuse by name.
+Behind that seam is a generic flash registry (`web/flash.js`) keyed by the
+tool's name: it hands the compiled firmware and the selected WebSerial port to
+a registered flasher. The AVR/STK500v1 flasher (`web/flash-avr.js`) is the first
+plugin; `installFlashers()` adds more without touching the CLI bridge or the
+compiler dispatch. `test/upload.mjs`, `test/flash-driver.mjs` and
+`test/flash-avr.mjs` cover the route, the registry and a real protocol exchange
+against a fake device. The stub's firmware `flash` remains the fallback.
 
 One boot error is a real gap, not a stub: `A resource provider for
 'user-storage:/user/keymaps.json' is not registered`, thrown from

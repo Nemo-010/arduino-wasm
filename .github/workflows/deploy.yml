@@ -58,6 +58,11 @@ jobs:
       - name: Test the generic upload path
         run: node test/upload.mjs
 
+      - name: Test the flash dispatcher and AVR flasher
+        run: |
+          node test/flash-driver.mjs
+          node test/flash-avr.mjs
+
       - name: Test the page
         run: node test/page.mjs
 

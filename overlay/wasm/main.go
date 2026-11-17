@@ -314,6 +314,17 @@ func taskEmitter(emit emitter) rpc.TaskProgressCB {
 	return func(p *rpc.TaskProgress) { emit("task", p) }
 }
 
+// publishUploadPort hands the selected port to the page's flash drivers. The
+// CLI does not put it in the tool command line; the upload RPC is where it is
+// known, so this is the one place that has to carry it across.
+func publishUploadPort(port *rpc.Port) {
+	ctx := js.Global().Get("Object").New()
+	ctx.Set("address", port.GetAddress())
+	ctx.Set("protocol", port.GetProtocol())
+	ctx.Set("label", port.GetLabel())
+	js.Global().Set("__arduinoUploadPort", ctx)
+}
+
 // streamHandlers are the RPCs that send more than one response. Each one calls
 // the real service method with the real request type; only the transport is
 // replaced.
@@ -510,6 +521,11 @@ var streamHandlers = map[string]streamHandler{
 		if err := decode(&req); err != nil {
 			return err
 		}
+		// The CLI's exec request names the tool and the hex, but not the selected
+		// serial port -- that lives on this RPC. Publish it as a page-level flash
+		// context so whichever driver answers the exec call can open the same
+		// port the user picked in the IDE. One context for every upload tool.
+		publishUploadPort(req.GetPort())
 		stream := &responseStream[rpc.UploadResponse]{send: func(m *rpc.UploadResponse) error {
 			emit("result", m)
 			return nil

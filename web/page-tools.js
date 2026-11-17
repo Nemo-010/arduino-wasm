@@ -9,6 +9,8 @@
 import { createArmAssets } from "./arm-assets.js";
 import { createAvrAssets } from "./avr-assets.js";
 import { createExec } from "./exec.js";
+import { createFlashDriver } from "./flash.js";
+import { createAvrFlash } from "./flash-avr.js";
 import { createPageDriver } from "./page-drivers.js";
 import { makeXhrRead } from "./page-index.js";
 
@@ -33,10 +35,38 @@ export function installPageTools({ nodefs, log, base = "" } = {}) {
     load: makeXhrRead(armDir),
     importModule: importFrom(armDir),
   });
+  // One registry for every upload tool. A page can add more flashers with
+  // `installFlashers({ name: fn })`; the AVR one is built in because the CLI
+  // page ships the AVR platform. The driver reads firmware through the same
+  // nodefs shim the compiler uses, so the hex is the one the CLI just built.
+  const flash = createFlashDriver({
+    readFile: async (path) => {
+      const fs = nodefs.fs;
+      const fd = await new Promise((resolve, reject) => fs.open(path, "r", 0o644, (e, v) => e ? reject(e) : resolve(v)));
+      try {
+        const stat = await new Promise((resolve, reject) => fs.fstat(fd, (e, v) => e ? reject(e) : resolve(v)));
+        const bytes = new Uint8Array(stat.size);
+        let at = 0;
+        while (at < bytes.length) {
+          const n = await new Promise((resolve, reject) => fs.read(fd, bytes, at, bytes.length - at, at, (e, v) => e ? reject(e) : resolve(v)));
+          if (!n) break;
+          at += n;
+        }
+        return bytes.subarray(0, at);
+      } finally {
+        await new Promise((resolve) => fs.close(fd, () => resolve()));
+      }
+    },
+    log,
+    flashers: { avrdude: createAvrFlash({ log }) },
+  });
+  globalThis.installFlashers = (more) => {
+    for (const [name, fn] of Object.entries(more)) flash.register(name, fn);
+  };
   globalThis.arduinoExec = createExec({
     nodefs,
     log,
-    createDriver: (options) => createPageDriver({ ...options, avr, arm }),
+    createDriver: (options) => createPageDriver({ ...options, avr, arm, flash }),
   });
-  return { avr, arm, exec: globalThis.arduinoExec };
+  return { avr, arm, flash, exec: globalThis.arduinoExec };
 }

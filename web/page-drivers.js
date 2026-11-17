@@ -19,7 +19,12 @@ export function isArmTool(name) {
   return ARM_TOOL.test(name);
 }
 
-export function createPageDriver({ avr, arm, readFile, listDir, isDirectory, log }) {
+// Tools that belong to the AVR compiler driver. Upload tools are NOT here:
+// they route to the flash registry, so an unregistered upload tool is named
+// instead of being fed to avr-gcc.
+const AVR_TOOLS = /^(avr-g\+\+|avr-gcc|avr-gcc-ar|avr-ar|ar|avr-objcopy|objcopy|avr-size|size|ctags)$/;
+
+export function createPageDriver({ avr, arm, flash, readFile, listDir, isDirectory, log }) {
   // Both factories are async: each stages a sysroot before it can answer
   // anything. The promise is cached rather than the driver, so two commands
   // that arrive together share one load instead of decompressing twice.
@@ -33,12 +38,23 @@ export function createPageDriver({ avr, arm, readFile, listDir, isDirectory, log
     async run(request) {
       const argv = request.args || [];
       const tool = basename(argv[0] || "");
+      if (flash && flash.supports(tool)) {
+        return flash.run(request);
+      }
       if (isArmTool(tool)) {
         if (!armDriver) armDriver = build(arm, createArmDriver);
         return (await armDriver).run(request);
       }
-      if (!avrDriver) avrDriver = build(avr, createAvrDriver);
-      return (await avrDriver).run(request);
+      if (AVR_TOOLS.test(tool)) {
+        if (!avrDriver) avrDriver = build(avr, createAvrDriver);
+        return (await avrDriver).run(request);
+      }
+      return {
+        code: 1,
+        stdout: "",
+        stderr: "no in-page driver for tool " + tool + " (from: " + argv.join(" ") + ")\n",
+        files: [],
+      };
     },
     toolchains: () => ({
       avr: avrDriver !== null,
