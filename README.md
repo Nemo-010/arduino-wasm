@@ -651,9 +651,12 @@ Behind that seam is a generic flash registry (`web/flash.js`) keyed by the
 tool's name: it hands the compiled firmware and the selected WebSerial port to
 a registered flasher. The AVR/STK500v1 flasher (`web/flash-avr.js`) is the first
 plugin; `installFlashers()` adds more without touching the CLI bridge or the
-compiler dispatch. `test/upload.mjs`, `test/flash-driver.mjs` and
-`test/flash-avr.mjs` cover the route, the registry and a real protocol exchange
-against a fake device. The stub's firmware `flash` remains the fallback.
+compiler dispatch. `test/upload.mjs`, `test/flash-driver.mjs`,
+`test/flash-avr.mjs` and `test/page-flash.mjs` cover the route, the registry,
+a real protocol exchange against a fake device, and the full browser flow:
+compile Blink, pick a fake WebSerial port, press Flash, and observe 2,408
+firmware bytes in the fake bootloader. The stub's firmware `flash` remains
+the fallback.
 
 One boot error is a real gap, not a stub: `A resource provider for
 'user-storage:/user/keymaps.json' is not registered`, thrown from

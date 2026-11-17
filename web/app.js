@@ -387,6 +387,9 @@ async function identifyBoard() {
     return;
   }
 
+  // The same port is what the upload tool must open. Keep the object, not just
+  // its ids: a WebSerial port cannot be reconstructed from an address.
+  globalThis.__arduinoSerialPort = port;
   const { usbVendorId, usbProductId } = port.getInfo();
   // The CLI compares these against boards.txt values such as `0x2341`, and
   // compares them case-insensitively but not numerically: the `0x` is part of
@@ -631,6 +634,40 @@ $("library-search").onclick = () => searchLibraries().catch((error) => log(error
 $("library-installed").onclick = () =>
   listInstalledLibraries().catch((error) => log(error.message, "err"));
 $("serial").onclick = () => identifyBoard().catch((error) => log(error.message, "err"));
+
+// Upload is generic: the CLI builds the command from the board's own recipe
+// and the page's flash registry routes it by tool name. No board is named here.
+async function flashSketch() {
+  if (!globalThis.__arduinoSerialPort) {
+    log("pick a serial device first", "err");
+    return;
+  }
+  const fqbn = $("compile-fqbn").value.trim();
+  const status = $("flash-status");
+  status.textContent = "uploading…";
+  try {
+    const events = await call("Upload", {
+      instance,
+      sketch_path: SKETCH_DIR,
+      fqbn,
+      port: { address: "serial", protocol: "serial", label: "selected device" },
+      verbose: true,
+      verify: false,
+      user_fields: {},
+    });
+    const text = events.flatMap((event) => {
+      if (event.data?.outStream) return [b64text(event.data.outStream)];
+      if (event.data?.errStream) return [b64text(event.data.errStream)];
+      return [];
+    }).join("");
+    status.textContent = /error|failed/i.test(text) ? "upload failed" : "upload done";
+    log(text.trim() || "upload finished");
+  } catch (error) {
+    status.textContent = "upload failed";
+    log(error.message, "err");
+  }
+}
+$("flash").onclick = () => flashSketch().catch((error) => log(error.message, "err"));
 $("core-install-avr").onclick = () => installCoreNamed("arduino", "avr", $("core-install-avr"));
 $("core-install-nrf52").onclick = () =>
   installCoreNamed("Seeeduino", "nrf52", $("core-install-nrf52"));

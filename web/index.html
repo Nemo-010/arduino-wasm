@@ -234,6 +234,7 @@
         <button id="core-install-avr" disabled>Install arduino:avr</button>
         <button id="core-install-nrf52" disabled>Install Seeeduino:nrf52</button>
         <button id="compile" disabled>Compile</button>
+        <button id="flash" disabled>Flash</button>
       </div>
       <div class="row" style="margin-top: 0.5rem">
         <textarea id="sketch" spellcheck="false">void setup() {
@@ -249,6 +250,7 @@ void loop() {
       </div>
       <div class="row" style="margin-top: 0.5rem">
         <span id="compile-status" class="meta"></span>
+        <span id="flash-status" class="meta"></span>
         <a id="hex-download" class="meta" download="Sketch.ino.hex" hidden>Download .hex</a>
         <a id="zip-download" class="meta" download="Sketch.ino.zip" hidden>Download DFU .zip</a>
       </div>

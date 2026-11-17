@@ -58,7 +58,12 @@ export function installPageTools({ nodefs, log, base = "" } = {}) {
       }
     },
     log,
-    flashers: { avrdude: createAvrFlash({ log }) },
+    flashers: {
+      avrdude: createAvrFlash({
+        log,
+        portProvider: async () => globalThis.__arduinoSerialPort || undefined,
+      }),
+    },
   });
   globalThis.installFlashers = (more) => {
     for (const [name, fn] of Object.entries(more)) flash.register(name, fn);
