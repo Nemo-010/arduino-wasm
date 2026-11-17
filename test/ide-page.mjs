@@ -83,14 +83,25 @@ window.__job = { stage: 'waiting', done: false, error: null, summary: null, sket
 // What the user sees, read after the boot: the IDE's own chrome, the sketch it
 // opened by itself, and the text in the editor. A page that only answers RPCs
 // would pass the compile checks below and fail these.
-const dom = `JSON.stringify({
-  title: document.title,
+// One short expression per element: a single large evaluate returned no value
+// through the DevTools pipe, which made a real bar look absent.
+const installBox = `window.__box = function (id) {
+  var el = document.getElementById(id);
+  if (!el) return null;
+  var r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+  return { text: (el.innerText || '').slice(0, 80), x: Math.round(r.x), y: Math.round(r.y),
+    w: Math.round(r.width), h: Math.round(r.height),
+    visible: cs.visibility !== 'hidden' && cs.display !== 'none' && r.height > 0 };
+}; 'box installed'`;
+const domHead = `JSON.stringify({ title: document.title,
   splash: !!document.querySelector('.theia-preload'),
   editors: document.querySelectorAll('.theia-editor, .monaco-editor').length,
-  menuLabels: window.__menuBar ? window.__menuBar.menus.map(m => m.title && m.title.label) : null,
-  menuText: window.__menuBar ? window.__menuBar.node.textContent : '',
-  text: document.body.innerText,
-})`;
+  text: document.body.innerText })`;
+const domBar = `JSON.stringify({ top: window.__box('theia-top-panel'),
+  menubar: window.__box('theia:menubar'),
+  menuLabels: (document.getElementById('theia:menubar') || { innerText: '' }).innerText.split(String.fromCharCode(10)).map(function (s) { return s.trim(); }).filter(Boolean) })`;
+const domToolbar = `JSON.stringify({ deviceSelector: window.__box('left-arduino-toolbar'),
+  toolbar: window.__box('arduino-toolbar-container') })`;
 
 const profile = "/tmp/arduino-ide-page-" + process.pid;
 let failures = 0;
@@ -123,7 +134,14 @@ try {
     shot,
     preScript: `try { localStorage.setItem('arduino.index.library', ${JSON.stringify(LIBRARY_INDEX)}); } catch (e) {}`,
     steps: [
-      { wait: 45000, evaluate: dom },
+      // A fixed timer graded a splash on a slow CDN load. Wait for the app's
+      // own ready state before judging what the user can see.
+      { until: (value) => String(value).includes('"ready":true'), timeout: 300000, wait: 5000,
+        evaluate: "JSON.stringify({ ready: !document.querySelector('.theia-preload') })" },
+      { wait: 3000, evaluate: installBox },
+      { wait: 300, evaluate: domHead },
+      { wait: 300, evaluate: domBar },
+      { wait: 300, evaluate: domToolbar },
       { wait: 5000, evaluate: job },
       {
         until: (value) => String(value).includes('"done":true'),
@@ -156,19 +174,55 @@ rmSync(profile, { recursive: true, force: true });
 const state = result.state;
 // Step 2 is the compile result; the last step is the Alt toggle, which must
 // not be mistaken for the job's summary.
-const raw = state.steps[2];
+// Select the compile result by its own shape; step positions shift whenever
+// a boot probe is added.
+let raw = null;
+for (const step of state.steps) {
+  let parsed = null;
+  try { parsed = JSON.parse(String(step)); } catch { continue; }
+  if (parsed && parsed.stage !== undefined && parsed.done !== undefined && parsed.sections !== undefined) {
+    raw = String(step); break;
+  }
+}
 let seen = null;
 try { seen = JSON.parse(String(raw)); } catch (error) { seen = null; }
 
+// The number of boot-probe steps can change; select the snapshot by its own
+// shape instead of by an index that silently shifts.
 let ui = null;
-try { ui = JSON.parse(String(state.steps[0])); } catch (error) { ui = null; }
+for (const step of state.steps) {
+  let parsed = null;
+  try { parsed = JSON.parse(String(step)); } catch { continue; }
+  if (parsed && parsed.title !== undefined && parsed.text !== undefined) {
+    ui = parsed;
+    ui.top = ui.top || null;
+    ui.menubar = ui.menubar || null;
+    ui.menuLabels = ui.menuLabels || [];
+    ui.deviceSelector = ui.deviceSelector || null;
+    ui.toolbar = ui.toolbar || null;
+  }
+  if (parsed && parsed.menubar !== undefined) Object.assign(ui || {}, parsed);
+  if (parsed && parsed.deviceSelector !== undefined) Object.assign(ui || {}, parsed);
+}
 ok("the IDE's own UI rendered", ui !== null && ui.splash === false, ui === null ? String(state.steps[0]).slice(0, 300) : "splash: " + ui.splash);
 if (ui) {
-  const labels = ui.menuLabels || [];
+  // The widget existing is not enough: a bar with zero height or clipped off
+  // screen is invisible to the user. Check rendered boxes in the top panel.
+  const labels = (ui.menuLabels || []).filter(Boolean);
   ok(
-    "the IDE's top bar is back",
-    labels.filter(Boolean).length >= 4 && /File/.test(ui.menuText) && /Sketch/.test(ui.menuText),
-    JSON.stringify(labels) + ' text: ' + String(ui.menuText).slice(0, 100),
+    "the IDE's top bar is rendered",
+    !!ui.top && ui.top.visible && !!ui.menubar && ui.menubar.visible &&
+      ui.menubar.w > 100 && ui.menubar.y === ui.top.y &&
+      labels.length >= 4 && labels.some((l) => /File/.test(l)) && labels.some((l) => /Sketch/.test(l)),
+    JSON.stringify({ top: ui.top, menubar: ui.menubar, labels }),
+  );
+  ok(
+    "the device selector is rendered in the top bar",
+    !!ui.deviceSelector && ui.deviceSelector.visible && ui.deviceSelector.w > 100 &&
+      /Select Board/.test(String(ui.deviceSelector.text)) &&
+      !!ui.toolbar && ui.toolbar.visible && !!ui.top && ui.toolbar.y === ui.top.y &&
+      ui.deviceSelector.x < ui.menubar.x,
+    JSON.stringify({ deviceSelector: ui.deviceSelector, toolbar: ui.toolbar, menubar: ui.menubar }),
   );
   let alt = null;
   try { alt = JSON.parse(String(state.steps[state.steps.length - 1])); } catch { alt = null; }
