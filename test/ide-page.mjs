@@ -87,6 +87,8 @@ const dom = `JSON.stringify({
   title: document.title,
   splash: !!document.querySelector('.theia-preload'),
   editors: document.querySelectorAll('.theia-editor, .monaco-editor').length,
+  menuLabels: window.__menuBar ? window.__menuBar.menus.map(m => m.title && m.title.label) : null,
+  menuText: window.__menuBar ? window.__menuBar.node.textContent : '',
   text: document.body.innerText,
 })`;
 
@@ -129,6 +131,18 @@ try {
         wait: 15000,
         evaluate: read,
       },
+      {
+        wait: 500,
+        evaluate: `(function(){
+          var bar = window.__menuBar;
+          if (!bar) return JSON.stringify({ before: null });
+          var before = !bar.isHidden;
+          window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Alt' }));
+          var down = !bar.isHidden;
+          window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Alt' }));
+          return JSON.stringify({ before: before, down: down, up: !bar.isHidden });
+        })()`,
+      },
     ],
   });
 } catch (error) {
@@ -140,13 +154,26 @@ try {
 rmSync(profile, { recursive: true, force: true });
 
 const state = result.state;
-const raw = state.steps[state.steps.length - 1];
+// Step 2 is the compile result; the last step is the Alt toggle, which must
+// not be mistaken for the job's summary.
+const raw = state.steps[2];
 let seen = null;
 try { seen = JSON.parse(String(raw)); } catch (error) { seen = null; }
 
 let ui = null;
 try { ui = JSON.parse(String(state.steps[0])); } catch (error) { ui = null; }
 ok("the IDE's own UI rendered", ui !== null && ui.splash === false, ui === null ? String(state.steps[0]).slice(0, 300) : "splash: " + ui.splash);
+if (ui) {
+  const labels = ui.menuLabels || [];
+  ok(
+    "the IDE's top bar is back",
+    labels.filter(Boolean).length >= 4 && /File/.test(ui.menuText) && /Sketch/.test(ui.menuText),
+    JSON.stringify(labels) + ' text: ' + String(ui.menuText).slice(0, 100),
+  );
+  let alt = null;
+  try { alt = JSON.parse(String(state.steps[state.steps.length - 1])); } catch { alt = null; }
+  ok("Alt toggles the top bar", !!alt && alt.before === true && alt.down === false, JSON.stringify(alt));
+}
 if (ui) {
   ok("the window titles the sketch the IDE opened", /sketch_\w+ \| Arduino IDE/.test(ui.title), ui.title);
   ok("an editor was opened for the sketch", ui.editors > 0, String(ui.editors));

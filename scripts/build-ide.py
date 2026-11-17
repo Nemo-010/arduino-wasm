@@ -241,6 +241,15 @@ def patch_entry(app):
         "    require('../../inpage/inpage-backend-module');\n"
         "    require('../../inpage/inpage-backend-module').install(container);",
     )
+    # The menu needs the frontend modules loaded: ContextKeyService and the
+    # menu model are bound by frontendApplicationModule and the IDE module,
+    # which arrive after install(). Hook here, after all `await load(...)` and
+    # before app.start(), so the shell exists when the bar is added.
+    replace_once(
+        "        MonacoInit.init(container);",
+        "        require('../../inpage/inpage-backend-module').installMenu(container);\n"
+        "        MonacoInit.init(container);",
+    )
     entry.write_text(text)
     print("  => entry patched: %d hooks" % text.count("inpage-backend-module"))
 

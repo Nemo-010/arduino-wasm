@@ -287,6 +287,101 @@ function install(container) {
   source.open(server => attachServer(server, createTargets(services)));
 }
 
+// The frontend creates its shell and layout while starting up. Resolving the
+// menu factory or the shell before that finished stopped the boot sketch from
+// opening, so wait for the app's own 'ready' state first. The bounded fill
+// inside still handles the menu model arriving after that point.
+function installMenuAfterReady(container) {
+  try {
+    const { FrontendApplicationStateService } = require('@theia/core/lib/browser/frontend-application-state');
+    container.get(FrontendApplicationStateService).reachedState('ready').then(
+      () => installMenuBar(container),
+      (error) => { window.__menuError = String((error && error.stack) || error).slice(0, 1200); },
+    );
+  } catch (error) {
+    window.__menuError = String((error && error.stack) || error).slice(0, 1200);
+  }
+}
+
+// The Electron app draws its menus in the native window through
+// `window.electronArduino.setMenu`, which the page has to stub with a no-op.
+// Theia's browser menu bar is in the same bundle and knows the real menu model,
+// so put that widget in the top panel instead of inventing a menu. A browser
+// has no native menu to reveal with Alt, so pressing Alt toggles the bar the
+// same way Windows reveals a hidden native one.
+function installMenuBar(container) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    const {
+      BrowserMainMenuFactory,
+    } = require('@theia/core/lib/browser/menu/browser-menu-plugin');
+    const { ApplicationShell } = require('@theia/core/lib/browser/shell/application-shell');
+    // The electron target never loads Theia's browser-menu module, so the
+    // factory has no binding. Bind it here; inversify resolves its injected
+    // services (menu model, commands, keybindings, preferences) from the same
+    // container the frontend already uses.
+    if (!container.isBound(BrowserMainMenuFactory)) {
+      container.bind(BrowserMainMenuFactory).toSelf().inSingletonScope();
+    }
+    const factory = container.get(BrowserMainMenuFactory);
+    const shell = container.get(ApplicationShell);
+    const bar = factory.createMenuBar();
+    let added = false;
+    // The IDE's settings can say 'hidden' or 'compact'; the user asked for the
+    // bar, so fill it with the classic menu model regardless of that preference.
+    const show = () => factory.showMenuBar(bar, 'classic');
+    show();
+    // The menu model is contributed by frontend contributions during
+    // app.start(), after this hook runs. Fill again at 'ready': the model then
+    // has File/Edit/Sketch/Tools/View/Help, and a factory created this late has
+    // missed the earlier onDidChange events.
+    // The contributions add nodes to the menu model after this hook, and the
+    // resulting change event does not reach a factory created this late. Poll
+    // briefly and stop as soon as the bar has menus; a bounded wait keeps a
+    // future upstream change from turning this into a permanent timer.
+    let attempts = 0;
+    const fill = () => {
+      show();
+      attempts += 1;
+      if (bar.menus.length > 0 && !added) {
+        // Adding a widget to the top panel while the shell is restoring its
+        // layout stopped the boot sketch from opening. Add it only once the
+        // menu model exists, i.e. after the frontend contributions have run.
+        shell.addWidget(bar, { area: 'top' });
+        added = true;
+      }
+      if (added || attempts >= 60) {
+        clearInterval(timer);
+      }
+    };
+    const timer = setInterval(fill, 500);
+    fill();
+    const visible = () => !bar.isHidden;
+    window.__menuBar = bar;
+    window.__menuAlt = () => {
+      const next = !visible();
+      bar.setHidden(!next);
+      shell.setTopPanelVisibility(next ? 'classic' : 'hidden');
+      return next;
+    };
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Alt' && !event.repeat && !event.ctrlKey && !event.metaKey) {
+        window.__menuAlt();
+      }
+    });
+    window.addEventListener('blur', () => {
+      if (visible()) {
+        window.__menuAlt();
+      }
+    });
+    window.__menuInstalled = true;
+  } catch (error) {
+    window.__menuError = String((error && error.stack) || error).slice(0, 1200);
+  }
+}
+
 class OfflineSocketSource extends ElectronWebSocketConnectionSource {
   openSocket() {
     // The RPC traffic goes over the in-memory channel pair, so no websocket is
@@ -348,7 +443,7 @@ function stubElectron() {
   }
 }
 
-module.exports = { install, stub: stubElectron };
+module.exports = { install, installMenu: installMenuAfterReady, stub: stubElectron };
 
 // The Electron preload scripts run before `install()` gets the container, and a
 // missing `window.electronTheiaCore` leaves them hanging rather than throwing.

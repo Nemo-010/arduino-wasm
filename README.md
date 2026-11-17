@@ -755,6 +755,20 @@ property in Node — the version absent during the factory call, present
 afterwards as the same object, absent-not-falsy, and restored when the factory
 throws — because Node cannot reproduce the browser's failure.
 
+#### The top bar
+
+The Electron app draws its File/Edit/Sketch/Tools/Help menu in the native
+window through `window.electronArduino.setMenu`, which this page has to stub
+with a no-op, so the browser initially rendered no menu bar at all. The overlay
+binds Theia's own browser menu factory in the container and adds its menu bar
+to the shell's top panel. The factory and shell must not be resolved while the
+frontend is still starting up: doing so stopped the boot sketch from opening
+(measured, with a control build that left the hook out). The setup therefore
+runs at the app's `ready` state, and the bar is filled once the contributions
+have populated the menu model. Pressing Alt toggles the bar, the way Windows
+reveals its hidden native menu. `test/ide-page.mjs` asserts both the six menus
+and the Alt toggle.
+
 #### What the page actually runs
 
 `node test/ide-page.mjs` boots `web/ide/index.html` in headless Chrome over
@@ -843,6 +857,7 @@ node test/ide-services.mjs   # the IDE's own backend classes, same precondition
 node test/ide-page.mjs       # the IDE's own UI in Chrome, compiles a sketch
 NETWORK=1 node test/network.mjs   # a real index over TLS, opt-in
 NETWORK=1 node test/nrf52.mjs     # install a real core, compile blink, opt-in
+NETWORK=1 node test/board-glyph.mjs [url]  # simulate ESP32-C6 setup + upload
 ```
 
 `test/page-browser.mjs` and `test/ide-page.mjs` both run in CI: the workflow
@@ -856,6 +871,18 @@ are printed in the test output.
 `test/arm-tools.mjs` is not in that list because it needs `build/arm-wasm/out/`,
 which a fresh clone does not have: the tools are built by the script and
 gitignored. `test/nrf52.mjs` needs the network.
+
+`test/board-glyph.mjs` simulates a user adding Espressif's index, installing
+`esp32:esp32`, selecting `esp32:esp32:esp32c6` (the ESP32-C6 board the Glyph
+hardware uses; neither vendor repo has a Glyph-specific id), and uploading
+Blink, with a dummy WebUSB device attached. It reports each step's outcome
+instead of claiming the board flashed. Measured 2026-11-17 against the deployed
+page: the URL is written into `arduino-cli.yaml`, `updateIndex` returns ok, but
+`package_esp32_index.json` never appears in the data directory and the install
+fails with `package esp32 not found`, so compile and upload are not reached and
+the dummy USB sees zero calls. That is the concrete blocker for this board, not
+a success. WebUSB is also not what Arduino's upload path uses: it goes through
+the CLI's native esptool and a serial port, neither of which this page can run.
 
 The three IDE tests that need a built tree all grade `web/arduino-cli.wasm`, the
 file the page ships. A copy in `/tmp` once made `test/ide-client.mjs` grade a wasm
