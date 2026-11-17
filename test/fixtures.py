@@ -49,6 +49,10 @@ def core_zip():
             "version=" + PLATFORM_VERSION + "\n"
             "compiler.path={runtime.tools.testtool.path}/bin/\n"
             "recipe.c.o.pattern=\"{compiler.path}testtool\"\n"
+            "upload.tool=testtool\n"
+            "upload.protocol=serial\n"
+            "upload.tool.serial=testtool\n"
+            "upload.pattern=\"{compiler.path}testtool\" -Uflash:w:{build.path}/{build.project_name}.hex:i\n"
         ).encode(),
         "testavr/boards.txt": (
             "testboard.name=Test Board\n"

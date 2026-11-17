@@ -55,6 +55,9 @@ jobs:
       - name: Test the CLI
         run: node test/run.mjs
 
+      - name: Test the generic upload path
+        run: node test/upload.mjs
+
       - name: Test the page
         run: node test/page.mjs
 

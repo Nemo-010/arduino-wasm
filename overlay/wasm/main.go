@@ -321,19 +321,24 @@ func taskEmitter(emit emitter) rpc.TaskProgressCB {
 // the JavaScript callback. Compile is the one RPC arduino-cli exposes as a
 // server stream without shipping a callback adapter, so the adapter lives here.
 // Everything else about the call is upstream's.
-type compileStream struct {
-	send func(*rpc.CompileResponse) error
+// responseStream adapts any of the CLI's server-streaming methods to the
+// bridge's emit callback. Compile needed this first; upload, upload using a
+// programmer and burn bootloader are the same shape with a different response
+// message, so one generic adapter covers all four. The service method still
+// owns the protocol and the exec seam -- only Send is replaced.
+type responseStream[T any] struct {
+	send func(*T) error
 }
 
-func (s *compileStream) Send(m *rpc.CompileResponse) error { return s.send(m) }
-func (s *compileStream) SetHeader(metadata.MD) error       { return nil }
-func (s *compileStream) SendHeader(metadata.MD) error      { return nil }
-func (s *compileStream) SetTrailer(metadata.MD)            {}
-func (s *compileStream) Context() context.Context          { return ctx }
-func (s *compileStream) SendMsg(any) error                 { return nil }
-func (s *compileStream) RecvMsg(any) error                 { return io.EOF }
+func (s *responseStream[T]) Send(m *T) error               { return s.send(m) }
+func (s *responseStream[T]) SetHeader(metadata.MD) error   { return nil }
+func (s *responseStream[T]) SendHeader(metadata.MD) error  { return nil }
+func (s *responseStream[T]) SetTrailer(metadata.MD)        {}
+func (s *responseStream[T]) Context() context.Context      { return ctx }
+func (s *responseStream[T]) SendMsg(any) error             { return nil }
+func (s *responseStream[T]) RecvMsg(any) error             { return io.EOF }
 
-var _ grpc.ServerStreamingServer[rpc.CompileResponse] = (*compileStream)(nil)
+var _ grpc.ServerStreamingServer[rpc.CompileResponse] = (*responseStream[rpc.CompileResponse])(nil)
 
 var streamHandlers = map[string]streamHandler{
 	"Compile": func(decode decode, emit emitter) error {
@@ -341,7 +346,7 @@ var streamHandlers = map[string]streamHandler{
 		if err := decode(&req); err != nil {
 			return err
 		}
-		stream := &compileStream{send: func(m *rpc.CompileResponse) error {
+		stream := &responseStream[rpc.CompileResponse]{send: func(m *rpc.CompileResponse) error {
 			emit("result", m)
 			return nil
 		}}
@@ -495,15 +500,47 @@ var streamHandlers = map[string]streamHandler{
 		}
 		return errStreamStaysOpen
 	},
-	// The remaining five streaming RPCs each need something the page does not
-	// have behind this transport: a host toolchain run with a serial port on the
-	// other end (upload, uploadUsingProgrammer, burnBootloader), or a serial
-	// device owned by the page (monitor, debug). Answering them by name is
-	// better than letting `invokeUnary` report "not a unary RPC", which says
-	// nothing to whoever reads it.
-	"Upload":                 refuseStream("Upload", "uploads run over WebSerial from the page, not through the wasm CLI"),
-	"UploadUsingProgrammer":  refuseStream("UploadUsingProgrammer", "uploads run over WebSerial from the page, not through the wasm CLI"),
-	"BurnBootloader":         refuseStream("BurnBootloader", "a bootloader burn drives a programmer over WebSerial, which the page does not wire yet"),
+	// Upload, upload using a programmer and burn bootloader are server streams
+	// from the real service. The CLI builds the tool command from the board's
+	// own upload recipe and hands it to the same exec seam a compile uses; the
+	// page supplies the tool through WebUSB/WebSerial there. No host process is
+	// involved, so these go through the real service like everything else.
+	"Upload": func(decode decode, emit emitter) error {
+		var req rpc.UploadRequest
+		if err := decode(&req); err != nil {
+			return err
+		}
+		stream := &responseStream[rpc.UploadResponse]{send: func(m *rpc.UploadResponse) error {
+			emit("result", m)
+			return nil
+		}}
+		return srv.Upload(&req, stream)
+	},
+	"UploadUsingProgrammer": func(decode decode, emit emitter) error {
+		var req rpc.UploadUsingProgrammerRequest
+		if err := decode(&req); err != nil {
+			return err
+		}
+		stream := &responseStream[rpc.UploadUsingProgrammerResponse]{send: func(m *rpc.UploadUsingProgrammerResponse) error {
+			emit("result", m)
+			return nil
+		}}
+		return srv.UploadUsingProgrammer(&req, stream)
+	},
+	"BurnBootloader": func(decode decode, emit emitter) error {
+		var req rpc.BurnBootloaderRequest
+		if err := decode(&req); err != nil {
+			return err
+		}
+		stream := &responseStream[rpc.BurnBootloaderResponse]{send: func(m *rpc.BurnBootloaderResponse) error {
+			emit("result", m)
+			return nil
+		}}
+		return srv.BurnBootloader(&req, stream)
+	},
+	// The remaining two streaming RPCs need a serial device or a debugger the
+	// page does not own yet. Answering them by name is better than letting
+	// `invokeUnary` report "not a unary RPC", which says nothing.
 	"Monitor":                refuseStream("Monitor", "the serial monitor owns a port the page has not wired to WebSerial yet"),
 	"Debug":                  refuseStream("Debug", "debugging needs a gdb session over a device the page does not have"),
 }

@@ -644,7 +644,11 @@ arduino-ide's own compiled classes when the bundle is on the page, and fall back
 to the stub method by method, with each fall-through recorded. The stubs remain
 for what a browser genuinely has no backend for: there is no plugin host, no
 debug adapter, and no serial monitor, so their empty answers are the true ones.
-`upload` and `flash` still refuse with a message saying so.
+`upload` is now answered by arduino-ide's own `CoreServiceImpl`: the CLI builds
+the board's declared upload command and hands it to the page's exec seam, the
+same seam a compile uses (`node test/upload.mjs` asserts the real command line).
+What is still missing is the flasher behind that seam for each upload tool; the
+stub's `upload` and firmware `flash` remain the fallback and refuse by name.
 
 One boot error is a real gap, not a stub: `A resource provider for
 'user-storage:/user/keymaps.json' is not registered`, thrown from
@@ -801,7 +805,8 @@ with no services. The live command above is what caught it.
 
 Still stubbed, and named as such: the serial monitor (a Proxy that throws by
 name), the plugin host, and the debug adapter, because a browser has no backend
-for them at all; `upload` and `flash` refuse by name; and the `nrfjprog` tool
+for them at all; the real `upload` service runs through the exec seam but its
+tool driver is not wired yet, and firmware `flash` still refuses by name; the `nrfjprog` tool
 archive the page carries is a dummy, since the tools it would install are not
 reachable from here.
 
