@@ -1,21 +1,23 @@
-// Simulate a user setting up a PCB Cupid Glyph ESP32-C6 in the IDE page and
-// trying to upload Blink, with a dummy WebUSB device attached.
+// Simulate a user setting up an ESP32 board in the IDE page and trying to
+// upload Blink, with a dummy WebUSB device attached. Boards: `glyph` (PCB Cupid
+// Glyph ESP32-C6) and `nodemcu32s` (NodeMCU-32S).
 //
 // This is an instrument, not a claim that the board flashes. It drives the
 // page's own service proxies and prints the outcome of each step; it exits 0
 // when the simulation itself completed and every outcome was recorded. What
 // the page cannot do is reported as a named result, never papered over.
 //
-// The Glyph C6 is ESP32-C6 hardware. Neither pcbcupid's repository nor
-// Espressif's boards.txt has a Glyph-specific board id, so the board selected
-// here is the vendor's `esp32:esp32:esp32c6`; the index URL is Espressif's.
+// Both boards come from Espressif's `esp32:esp32` platform. Neither pcbcupid's
+// repository nor Espressif's boards.txt has a Glyph-specific board id, so the
+// Glyph uses the standard ESP32-C6 board. NodeMCU-32S has its own id in
+// boards.txt. The index URL is Espressif's in both cases.
 //
 // Needs the Electrosphere for the index and the platform archives:
 //
-//   NETWORK=1 node test/board-glyph.mjs [url]
+//   NETWORK=1 node test/board-esp32.mjs [url] [glyph|nodemcu32s]
 //
 // Exit: 0 the simulation ran and reported every outcome, 1 it did not, 2 no
-//       NETWORK=1 or no browser. Writes: build/board-glyph.png.
+//       NETWORK=1 or no browser. Writes: build/board-<board>.png.
 
 import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -24,6 +26,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const { CHROME, launch } = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "cdp.mjs")).href);
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const page = join(root, "web", "ide", "index.html");
+const BOARDS = {
+  glyph: { fqbn: "esp32:esp32:esp32c6", label: "PCB Cupid Glyph ESP32-C6" },
+  nodemcu32s: { fqbn: "esp32:esp32:nodemcu-32s", label: "NodeMCU-32S" },
+};
+const boardName = process.argv[3] || "glyph";
+if (!BOARDS[boardName]) {
+  console.log("unknown board: " + boardName + " (choose: " + Object.keys(BOARDS).join(", ") + ")");
+  process.exit(2);
+}
+const board = BOARDS[boardName];
 const url = process.argv[2] || pathToFileURL(page).href;
 
 if (process.env.NETWORK !== "1") {
@@ -41,7 +53,7 @@ if (!url.startsWith("http") && !existsSync(page)) {
 
 const LIBRARY_INDEX = "https://raw.githubusercontent.com/arduino/arduino-cli/v1.6.0/commands/testdata/libraries/test1/library_index.json";
 const ESP32_INDEX = "https://espressif.github.io/arduino-esp32/package_esp32_index.json";
-const FQBN = "esp32:esp32:esp32c6";
+const FQBN = board.fqbn;
 
 // The page reads these keys itself (web/page-config.js); no test-only switch.
 // The USB device is a dummy: it answers the standard WebUSB calls and records
@@ -61,7 +73,7 @@ try {
     usbVersionMajor: 2, usbVersionMinor: 0, usbVersionSubminor: 0,
     deviceClass: 0xff, deviceSubclass: 0xff, deviceProtocol: 0xff,
     deviceVersionMajor: 1, deviceVersionMinor: 0, deviceVersionSubminor: 0,
-    product: 'Glyph ESP32-C6 (dummy)', manufacturer: 'PCB Cupid', serialNumber: 'dummy-1',
+    product: '${board.label} (dummy)', manufacturer: 'dummy', serialNumber: 'dummy-1',
     configuration: config, configurations: [config], opened: false,
     open: async function () { calls.push('open'); this.opened = true; },
     close: async function () { calls.push('close'); this.opened = false; },
@@ -154,14 +166,14 @@ const read = `JSON.stringify({
   cli: !!window.__arduinoCLIReady,
 })`;
 
-const profile = "/tmp/board-glyph-" + process.pid;
+const profile = "/tmp/board-" + boardName + "-" + process.pid;
 let result;
 try {
   result = await launch({
     url,
     waitMs: 30000,
     profile,
-    shot: join(root, "build", "board-glyph.png"),
+    shot: join(root, "build", "board-" + boardName + ".png"),
     preScript,
     steps: [
       { wait: 30000, evaluate: "document.title" },
@@ -199,7 +211,8 @@ if (state) {
   console.log("  WebUSB calls: " + JSON.stringify(state.usbCalls));
 }
 console.log("");
+console.log("board: " + board.label + " (" + FQBN + ")");
 console.log("page: " + url);
-console.log("shot: " + join(root, "build", "board-glyph.png"));
+console.log("shot: " + join(root, "build", "board-" + boardName + ".png"));
 console.log(failures === 0 ? "simulation complete; see the named outcomes above" : failures + " FAILED");
 process.exitCode = failures === 0 ? 0 : 1;
