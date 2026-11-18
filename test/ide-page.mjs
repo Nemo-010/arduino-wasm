@@ -35,7 +35,7 @@ if (!liveUrl && !existsSync(page)) {
 }
 const shot = join(root, "build", liveUrl ? "ide-live.png" : "ide-page.png");
 
-const { launch } = await import(pathToFileURL(join(root, "test", "cdp.mjs")).href);
+const { launch, removeProfile } = await import(pathToFileURL(join(root, "test", "cdp.mjs")).href);
 
 // A first boot wants a library index. The page cannot reach the host that
 // publishes the real one from here, so the URL the product reads is pointed at
@@ -164,12 +164,12 @@ try {
     ],
   });
 } catch (error) {
-  rmSync(profile, { recursive: true, force: true });
+  await removeProfile(profile);
   console.log("  FAIL the page could not be driven: " + String(error && error.message).slice(0, 300));
   console.log("1 failed");
   process.exit(1);
 }
-rmSync(profile, { recursive: true, force: true });
+await removeProfile(profile);
 
 const state = result.state;
 // Step 2 is the compile result; the last step is the Alt toggle, which must

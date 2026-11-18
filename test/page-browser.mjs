@@ -28,7 +28,7 @@ import { existsSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { CHROME, launch } from "./cdp.mjs";
+import {CHROME, launch, removeProfile} from "./cdp.mjs";
 
 const realProcess = process;
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -179,7 +179,7 @@ try {
   failures += 1;
   console.log("  FAIL the run did not finish: " + (error && error.stack ? error.stack : String(error)));
 } finally {
-  rmSync(profile, { recursive: true, force: true });
+  await removeProfile(profile);
 }
 
 console.log(failures === 0 ? "\nall checks passed" : "\n" + failures + " failed");

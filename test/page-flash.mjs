@@ -27,7 +27,7 @@ if (!existsSync(chrome)) {
   }
 }
 process.env.ARDUINO_WASM_CHROME = chrome;
-const { launch } = await import("./cdp.mjs");
+const { launch, removeProfile } = await import("./cdp.mjs");
 if (missing.length || !existsSync(page) || !existsSync(chrome)) {
   console.log("missing precondition: " + (missing.join(", ") || (existsSync(page) ? chrome : page)));
   process.exit(2);
@@ -117,7 +117,7 @@ try {
   console.log("FAIL the browser run did not finish: " + String(error).slice(0, 500));
   process.exit(1);
 } finally {
-  rmSync(profile, { recursive: true, force: true });
+  await removeProfile(profile);
 }
 
 const final = JSON.parse(String(result.state.steps[result.state.steps.length - 1]));

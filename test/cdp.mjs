@@ -8,11 +8,27 @@
 // Usage: node test/cdp.mjs <url> [--wait ms] [--shot out.png] [--eval expr]
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export const CHROME =
   process.env.ARDUINO_WASM_CHROME || '/workspace/.scratch/chrome/chrome-linux64/chrome';
+
+// Chrome keeps writing its profile after the browser is told to close. A
+// single rmSync in a finally clause then fails with ENOTEMPTY and turns a green
+// test red. Retry briefly, and ignore a directory that is still busy: a fresh
+// profile per run is the point, and the next run uses a different path.
+export async function removeProfile(path) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error && error.code !== 'ENOTEMPTY' && error.code !== 'EBUSY' && error.code !== 'EPERM') throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+}
 
 class Pipe {
   constructor(readStream, writeStream) {

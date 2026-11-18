@@ -23,7 +23,7 @@
 import { existsSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launch, CHROME } from './cdp.mjs';
+import { launch, CHROME, removeProfile } from './cdp.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PAGE = join(ROOT, 'build/ide-dist/frontend/index.html');
@@ -62,7 +62,7 @@ async function main() {
       evaluate: '!!document.querySelector(".theia-preload")',
     });
   } finally {
-    rmSync(profile, { recursive: true, force: true });
+    await removeProfile(profile);
   }
   const state = result.state;
   const bodyText = (state.bodyText || '').replace(/\u00a0/g, ' ');

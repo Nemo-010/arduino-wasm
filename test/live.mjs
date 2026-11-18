@@ -20,7 +20,7 @@
 
 import { rmSync } from "node:fs";
 
-import { launch } from "./cdp.mjs";
+import {launch, removeProfile} from "./cdp.mjs";
 import { check } from "./dom.mjs";
 
 const DEFAULT_URL = "https://nemo-010.github.io/arduino-wasm/";
@@ -49,7 +49,7 @@ const logText = 'document.getElementById("log").textContent.slice(-4000)';
 // A fresh profile every run: the platform lives in IndexedDB, and a profile
 // that kept it would skip the first run this test exists to measure.
 const profile = "/tmp/arduino-wasm-live-profile";
-rmSync(profile, { recursive: true, force: true });
+await removeProfile(profile);
 
 const started = Date.now();
 const result = await launch({

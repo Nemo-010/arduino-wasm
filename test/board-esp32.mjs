@@ -23,7 +23,7 @@ import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const { CHROME, launch } = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "cdp.mjs")).href);
+const { CHROME, launch, removeProfile } = await import(pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "cdp.mjs")).href);
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const page = join(root, "web", "ide", "index.html");
 const BOARDS = {
@@ -185,7 +185,7 @@ try {
   console.log("FAIL simulation did not finish: " + String((error && error.stack) || error).slice(0, 800));
   process.exit(1);
 } finally {
-  rmSync(profile, { recursive: true, force: true });
+  await removeProfile(profile);
 }
 
 let state;
