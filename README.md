@@ -655,8 +655,11 @@ compiler dispatch. `test/upload.mjs`, `test/flash-driver.mjs`,
 `test/flash-avr.mjs` and `test/page-flash.mjs` cover the route, the registry,
 a real protocol exchange against a fake device, and the full browser flow:
 compile Blink, pick a fake WebSerial port, press Flash, and observe 2,408
-firmware bytes in the fake bootloader. The stub's firmware `flash` remains
-the fallback.
+firmware bytes in the fake bootloader. The Espressif plugin
+(`web/flash-esp.js`, vendored `esptool-js@0.7.1`) registers the `esptool.py`
+and `esptool_py` tool names and lets the library detect every chip it supports;
+`test/flash-esp.mjs` guards that registration surface, not a device flash.
+The stub's firmware `flash` remains the fallback.
 
 One boot error is a real gap, not a stub: `A resource provider for
 'user-storage:/user/keymaps.json' is not registered`, thrown from

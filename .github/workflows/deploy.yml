@@ -62,6 +62,7 @@ jobs:
         run: |
           node test/flash-driver.mjs
           node test/flash-avr.mjs
+          node test/flash-esp.mjs
           node test/page-flash.mjs
 
       - name: Test the page

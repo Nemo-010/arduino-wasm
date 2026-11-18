@@ -9,7 +9,6 @@ import { existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
-import { CHROME, launch } from "./cdp.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const page = join(root, "web", "index.html");
@@ -19,12 +18,21 @@ const profile = "/tmp/arduino-page-flash-" + process.pid;
 const assets = ["arduino-cli.wasm", "tools/avr/cc1plus.wasm.gz", "tools/avr/sysroot.tar.gz",
   "indexes/avr/package_index.json", "indexes/avr/avr-1.8.6.tar.bz2"];
 const missing = assets.filter((name) => !existsSync(join(root, "web", name)));
-if (missing.length || !existsSync(page) || !existsSync(CHROME)) {
-  console.log("missing precondition: " + (missing.join(", ") || (existsSync(page) ? CHROME : page)));
+// CI sets ARDUINO_WASM_CHROME after the build; this step can run earlier.
+let chrome = process.env.ARDUINO_WASM_CHROME || "/workspace/.scratch/chrome/chrome-linux64/chrome";
+if (!existsSync(chrome)) {
+  for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
+    const found = spawnSync("which", [name], { encoding: "utf8" }).stdout.trim();
+    if (found) { chrome = found; break; }
+  }
+}
+process.env.ARDUINO_WASM_CHROME = chrome;
+const { launch } = await import("./cdp.mjs");
+if (missing.length || !existsSync(page) || !existsSync(chrome)) {
+  console.log("missing precondition: " + (missing.join(", ") || (existsSync(page) ? chrome : page)));
   process.exit(2);
 }
-console.log("  chrome: " + String(spawnSync(CHROME, ["--version"], { encoding: "utf8" }).stdout || "").trim());
-
+console.log("  chrome: " + String(spawnSync(chrome, ["--version"], { encoding: "utf8" }).stdout || "").trim());
 // A fake WebSerial port that speaks STK500v1 like an Uno bootloader. It is
 // installed before the page loads, so the real app code uses it unchanged.
 const preScript = `(function () {
