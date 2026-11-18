@@ -63,6 +63,7 @@ jobs:
           node test/flash-driver.mjs
           node test/flash-avr.mjs
           node test/flash-esp.mjs
+          node test/flash-esp-chain.mjs
           node test/flash-nrf.mjs
           node test/page-flash.mjs
 
