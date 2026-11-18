@@ -667,9 +667,13 @@ For a core whose upload tool has no JS plugin yet, nodefs now has a generic
 character-device layer: `web/serial-device.js` maps the WebSerial port the user
 picked to `/dev/ttyACM0` and friends, so a tool compiled to wasm can use plain
 POSIX serial calls. `test/nodefs-device.mjs` and `test/serial-device.mjs` guard
-that layer. The remaining gap is a wasm build of the tool itself and, for tools
-that read from the port, an async-device bridge (JSPI/Asyncify is being
-measured; a synchronous write-only probe works today). The stub's firmware
+that layer. `scripts/serial-shim.c` and `web/serial-emscripten.js` solve the
+read side: a tool linked with `-Wl,--wrap=read` and `ASYNCIFY=1` suspends its C
+caller until WebSerial answers, so an unmodified tool using POSIX calls can
+flash. `test/serial-wasm.mjs` runs a prebuilt wasm probe through that bridge;
+`scripts/build-serial-tool.py` rebuilds it from
+`test/fixtures/serial-tool.c` with Emscripten 4.0.10. The remaining gap is a
+wasm build of each new tool itself. The stub's firmware
 `flash` remains the fallback.
 
 One boot error is a real gap, not a stub: `A resource provider for

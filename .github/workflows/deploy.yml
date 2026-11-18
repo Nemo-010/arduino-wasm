@@ -60,6 +60,7 @@ jobs:
           node test/upload.mjs
           node test/nodefs-device.mjs
           node test/serial-device.mjs
+          node test/serial-wasm.mjs
 
       - name: Test the flash dispatcher and AVR flasher
         run: |

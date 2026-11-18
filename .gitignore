@@ -9,6 +9,9 @@ test/fixtures/*
 # Not generated: the DFU goldens are adafruit-nrfutil's own output, committed so
 # the JavaScript port is compared against a real package rather than itself.
 !test/fixtures/nrfutil/
+# The prebuilt wasm serial probe: built by scripts/build-serial-tool.py,
+# committed so CI can run it without Emscripten.
+!test/fixtures/serial-tool.*
 
 __pycache__/
 *.pyc
