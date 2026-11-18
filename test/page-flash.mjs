@@ -100,6 +100,10 @@ try {
       { wait: 200, evaluate: "document.getElementById('flash').click(); 'flashing'" },
       { until: (v) => String(v) === "upload done" || String(v) === "upload failed",
         timeout: 180000, wait: 1000, evaluate: "document.getElementById('flash-status').textContent" },
+      { wait: 300, evaluate: `JSON.stringify({
+        avrdude: !!(window.__flashTools && window.__flashTools.supports('avrdude')),
+        esptool: !!(window.__flashTools && window.__flashTools.supports('esptool.py')),
+      })` },
       { wait: 500, evaluate: `JSON.stringify({
         flash: document.getElementById('flash-status').textContent,
         compile: document.getElementById('compile-status').textContent,
@@ -117,6 +121,10 @@ try {
 
 const final = JSON.parse(String(result.state.steps[result.state.steps.length - 1]));
 ok(/bytes of flash/.test(final.compile), "Blink compiled in the page", final.compile);
+let registered = null;
+try { registered = JSON.parse(String(result.state.steps[result.state.steps.length - 2])); } catch { registered = null; }
+ok(registered && registered.avrdude && registered.esptool,
+  "the page registered both upload tools", JSON.stringify(registered));
 ok(final.flash === "upload done", "the Flash button completed an upload", final.flash + " " + final.log);
 ok(Array.isArray(final.writes) && final.writes.length > 0, "the fake bootloader received flash pages", JSON.stringify(final.writes).slice(0, 300));
 if (final.writes && final.writes.length) {

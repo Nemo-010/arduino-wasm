@@ -11,6 +11,7 @@ import { createAvrAssets } from "./avr-assets.js";
 import { createExec } from "./exec.js";
 import { createFlashDriver } from "./flash.js";
 import { createAvrFlash } from "./flash-avr.js";
+import { createEspFlash } from "./flash-esp.js";
 import { createPageDriver } from "./page-drivers.js";
 import { makeXhrRead } from "./page-index.js";
 
@@ -63,8 +64,27 @@ export function installPageTools({ nodefs, log, base = "" } = {}) {
         log,
         portProvider: async () => globalThis.__arduinoSerialPort || undefined,
       }),
+      "esptool.py": createEspFlash({
+        log,
+        portProvider: async () => globalThis.__arduinoSerialPort || undefined,
+      }),
+      esptool_py: createEspFlash({
+        log,
+        portProvider: async () => globalThis.__arduinoSerialPort || undefined,
+      }),
+      "esptool.py": createEspFlash({
+        log,
+        portProvider: async () => globalThis.__arduinoSerialPort || undefined,
+      }),
+      esptool_py: createEspFlash({
+        log,
+        portProvider: async () => globalThis.__arduinoSerialPort || undefined,
+      }),
     },
   });
+  // Published for the page tests: a shipped page must prove which upload
+  // tools it can actually answer, not just that the plugin files exist.
+  globalThis.__flashTools = flash;
   globalThis.installFlashers = (more) => {
     for (const [name, fn] of Object.entries(more)) flash.register(name, fn);
   };
