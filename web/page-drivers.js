@@ -38,7 +38,7 @@ export function createPageDriver({ avr, arm, flash, readFile, listDir, isDirecto
     async run(request) {
       const argv = request.args || [];
       const tool = basename(argv[0] || "");
-      if (flash && flash.supports(tool)) {
+      if (flash && flash.supports(tool, request)) {
         return flash.run(request);
       }
       if (isArmTool(tool)) {

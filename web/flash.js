@@ -30,19 +30,28 @@ export function firmwarePath(args) {
 }
 
 export function createFlashDriver({ flashers = {}, readFile, log = () => {} }) {
-  const drivers = new Map(Object.entries(flashers).map(([name, fn]) => [basename(name), fn]));
+  const drivers = new Map(Object.entries(flashers).map(([name, entry]) => [basename(name), entry]));
+  const entryFor = (name) => {
+    const entry = drivers.get(basename(name));
+    return entry && typeof entry === "object" && typeof entry.run === "function"
+      ? entry
+      : entry && { run: entry };
+  };
   return {
     register(name, fn) {
       drivers.set(basename(name), fn);
     },
-    supports(tool) {
-      return drivers.has(basename(tool));
+    supports(tool, request) {
+      const entry = entryFor(tool);
+      if (!entry) return false;
+      return entry.supports ? entry.supports(request) : true;
     },
     async run(request) {
       const args = request.args || [];
       const tool = basename(args[0] || "");
-      const flasher = drivers.get(tool);
-      if (!flasher) {
+      const entry = entryFor(tool);
+      const flasher = entry && entry.run;
+      if (!flasher || (entry.supports && !entry.supports(request))) {
         return {
           code: 1,
           stdout: "",

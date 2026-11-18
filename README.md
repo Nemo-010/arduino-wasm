@@ -659,6 +659,10 @@ firmware bytes in the fake bootloader. The Espressif plugin
 (`web/flash-esp.js`, vendored `esptool-js@0.7.1`) registers the `esptool.py`
 and `esptool_py` tool names and lets the library detect every chip it supports;
 `test/flash-esp.mjs` guards that registration surface, not a device flash.
+The nRF52 plugin (`web/flash-nrf.js`) ports adafruit-nrfutil's serial DFU
+transport; `test/flash-nrf.mjs` proves a DFU package made by our own packaging
+port reaches a fake bootloader. All three plugins are registered in the page
+and the browser test names any that go missing.
 The stub's firmware `flash` remains the fallback.
 
 One boot error is a real gap, not a stub: `A resource provider for

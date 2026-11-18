@@ -12,6 +12,7 @@ import { createExec } from "./exec.js";
 import { createFlashDriver } from "./flash.js";
 import { createAvrFlash } from "./flash-avr.js";
 import { createEspFlash } from "./flash-esp.js";
+import { createNrfFlash } from "./flash-nrf.js";
 import { createPageDriver } from "./page-drivers.js";
 import { makeXhrRead } from "./page-index.js";
 
@@ -72,14 +73,18 @@ export function installPageTools({ nodefs, log, base = "" } = {}) {
         log,
         portProvider: async () => globalThis.__arduinoSerialPort || undefined,
       }),
-      "esptool.py": createEspFlash({
-        log,
-        portProvider: async () => globalThis.__arduinoSerialPort || undefined,
-      }),
-      esptool_py: createEspFlash({
-        log,
-        portProvider: async () => globalThis.__arduinoSerialPort || undefined,
-      }),
+      // The same tool also builds DFU packages (`dfu genpkg`); that step is
+      // the ARM driver's existing port, so only `dfu serial` belongs here.
+      nrfutil: (() => {
+        const flashNrf = createNrfFlash({
+          log,
+          portProvider: async () => globalThis.__arduinoSerialPort || undefined,
+        });
+        return {
+          supports: (request) => (request.args || []).includes("serial"),
+          run: flashNrf,
+        };
+      })(),
     },
   });
   // Published for the page tests: a shipped page must prove which upload
