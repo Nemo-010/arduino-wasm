@@ -663,7 +663,14 @@ The nRF52 plugin (`web/flash-nrf.js`) ports adafruit-nrfutil's serial DFU
 transport; `test/flash-nrf.mjs` proves a DFU package made by our own packaging
 port reaches a fake bootloader. All three plugins are registered in the page
 and the browser test names any that go missing.
-The stub's firmware `flash` remains the fallback.
+For a core whose upload tool has no JS plugin yet, nodefs now has a generic
+character-device layer: `web/serial-device.js` maps the WebSerial port the user
+picked to `/dev/ttyACM0` and friends, so a tool compiled to wasm can use plain
+POSIX serial calls. `test/nodefs-device.mjs` and `test/serial-device.mjs` guard
+that layer. The remaining gap is a wasm build of the tool itself and, for tools
+that read from the port, an async-device bridge (JSPI/Asyncify is being
+measured; a synchronous write-only probe works today). The stub's firmware
+`flash` remains the fallback.
 
 One boot error is a real gap, not a stub: `A resource provider for
 'user-storage:/user/keymaps.json' is not registered`, thrown from

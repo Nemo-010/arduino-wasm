@@ -410,6 +410,10 @@ export function createNodeFS(options = {}) {
   const stdout = options.stdout || ((text) => console.log(text));
   const stderr = options.stderr || ((text) => console.error(text));
   const cwd = { value: options.cwd || "/" };
+  // Character devices are paths a native tool can open (`/dev/ttyACM0`) whose
+  // bytes come from a WebSerial port instead of a file. One mechanism serves
+  // every upload tool: the tool's own platform recipe decides what to write.
+  const devices = options.devices || new Map();
 
   const fds = new Map();
   let nextFd = 3;
@@ -419,6 +423,8 @@ export function createNodeFS(options = {}) {
     if (path === "/") {
       return { kind: "dir", mode: 0o755, mtime: 0 };
     }
+    const device = devices.get(path);
+    if (device) return { kind: "device", mode: 0o666, mtime: 0, device };
     return backend.get(path);
   }
 
@@ -427,6 +433,9 @@ export function createNodeFS(options = {}) {
     if (depth > 32) throw fsError("ELOOP", path);
     let current = "/";
     const parts = normalize(path, cwd.value).split("/").filter(Boolean);
+    // A registered device is a leaf even when /dev was never created in the
+    // tree; skip the directory walk for it.
+    if (devices.has("/" + parts.join("/"))) return "/" + parts.join("/");
     for (let i = 0; i < parts.length; i++) {
       const next = current === "/" ? "/" + parts[i] : current + "/" + parts[i];
       const entry = await entryAt(next);
@@ -935,6 +944,13 @@ export function createNodeFS(options = {}) {
         const writing = (flags & (O_WRONLY | O_RDWR)) !== 0;
         if (entry.kind === "dir" && writing) throw fsError("EISDIR", path);
         if (entry.kind === "link") throw fsError("ENOENT", path);
+        if (entry.kind === "device") {
+          if (entry.device.open) await entry.device.open();
+          const descriptor = { path: resolved, kind: "device", device: entry.device, flags };
+          const deviceFd = nextFd++;
+          fds.set(deviceFd, descriptor);
+          return deviceFd;
+        }
 
         if ((flags & O_TRUNC) && entry.kind === "file") {
           entry = { ...entry, data: new Uint8Array(0), mtime: Date.now() };
@@ -960,6 +976,8 @@ export function createNodeFS(options = {}) {
 
     close(fd, cb) {
       callback(cb, (async () => {
+        const file = fds.get(fd);
+        if (file && file.kind === "device" && file.device.close) await file.device.close();
         await flushFd(fd);
         fds.delete(fd);
         return null;
@@ -972,6 +990,7 @@ export function createNodeFS(options = {}) {
         if (fd === 0) return new Stat("file", 0, 0o600, Date.now());
         const file = fds.get(fd);
         if (!file) throw fsError("EBADF");
+        if (file.kind === "device") return charDevice();
         if (file.kind === "dir") return new Stat("dir", 0, file.mode, file.mtime);
         return new Stat("file", file.data.length, file.mode, file.mtime);
       })());
@@ -1092,11 +1111,28 @@ export function createNodeFS(options = {}) {
       })());
     },
 
+    // termios and baud-rate configuration from a native serial tool land
+    // here. A device answers the request; ordinary files have no ioctls.
+    ioctl(fd, request, arg, cb) {
+      callback(cb, (async () => {
+        const file = fds.get(fd);
+        if (!file) throw fsError("EBADF");
+        if (file.kind === "device" && file.device.ioctl) {
+          return file.device.ioctl(request, arg);
+        }
+        return 0;
+      })());
+    },
+
     read(fd, buffer, offset, length, position, cb) {
       callback(cb, (async () => {
         if (fd === 0) return 0;
         const file = fds.get(fd);
         if (!file) throw fsError("EBADF");
+        if (file.kind === "device") {
+          if (!file.device.read) return 0;
+          return file.device.read(buffer, offset, length);
+        }
         if (file.kind !== "file") throw fsError("EISDIR");
         const start = position === null || position === undefined ? file.offset : Number(position);
         const end = Math.min(start + length, file.data.length);
@@ -1118,6 +1154,10 @@ export function createNodeFS(options = {}) {
         }
         const file = fds.get(fd);
         if (!file) throw fsError("EBADF");
+        if (file.kind === "device") {
+          if (!file.device.write) return length;
+          return file.device.write(buffer, offset, length);
+        }
         if (file.kind !== "file") throw fsError("EISDIR");
         const append = (file.flags & O_APPEND) !== 0;
         const start = append

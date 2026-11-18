@@ -390,6 +390,14 @@ async function identifyBoard() {
   // The same port is what the upload tool must open. Keep the object, not just
   // its ids: a WebSerial port cannot be reconstructed from an address.
   globalThis.__arduinoSerialPort = port;
+  // Every wasm upload tool opens a POSIX serial path. Registering it here,
+  // once, means a new tool needs no page code at all.
+  const { createSerialDevices } = await import("./serial-device.js");
+  if (globalThis.__arduinoDevices) {
+    for (const [path, device] of createSerialDevices(port)) {
+      globalThis.__arduinoDevices.set(path, device);
+    }
+  }
   const { usbVendorId, usbProductId } = port.getInfo();
   // The CLI compares these against boards.txt values such as `0x2341`, and
   // compares them case-insensitively but not numerically: the `0x` is part of

@@ -72,6 +72,7 @@ export async function startPageCLI({
   database = "arduino-wasm",
   cwd = "/home/arduino",
   prepare,
+  devices = new Map(),
 } = {}) {
   const backend = globalThis.indexedDB ? new IdbBackend(database) : new MemoryBackend();
   if (!globalThis.indexedDB) {
@@ -83,9 +84,11 @@ export async function startPageCLI({
     stdout: text => log(text),
     stderr: text => log(text, "err"),
     cwd,
+    devices,
   });
   await shim.ready();
   globalThis.fs = shim.fs;
+  globalThis.__arduinoDevices = devices;
   globalThis.path = shim.path;
   globalThis.process = shim.process;
 
